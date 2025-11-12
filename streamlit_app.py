@@ -1,7 +1,7 @@
 # streamlit_app.py
 """
-JINNI - Indian Stock Market AI (updated)
-Fixes symbol resolution & improves fetch reliability (tries .NS, .BO, raw).
+JINNI — Indian Stock Market AI (resilient fetch + background learner)
+Fixes: rate limiting, caching, backoff, reduced request rate, robust symbol resolution.
 Run: streamlit run streamlit_app.py
 """
 
@@ -11,109 +11,171 @@ import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import threading, time, random, os, pickle
-from typing import Tuple, List, Dict
+from datetime import datetime, timedelta
+import time, threading, random, os, pickle, json
+from typing import Tuple, Dict, List
 
 # ---------- Config ----------
-MODEL_FILE = "jinni_model.pkl"
-BG_INTERVAL = 20
-BG_BATCH_SIZE = 20
+CACHE_DIR = ".jinni_cache"
+if not os.path.exists(CACHE_DIR):
+    os.makedirs(CACHE_DIR)
+
+MODEL_FILE = os.path.join(CACHE_DIR, "jinni_model.pkl")
+FETCH_TTL_SECONDS = 60 * 30    # 30 minutes cache TTL for interactive use
+HIST_TTL_SECONDS = 60 * 60 * 6 # 6 hours cache TTL for background training
+RATE_LIMIT_MIN_INTERVAL = 1.2  # seconds between external fetches (global limiter)
+BG_INTERVAL = 40               # seconds between background learner batches
+BG_BATCH_SIZE = 30
 N_LAGS = 6
-MAX_UNIVERSE = 1200
-DEFAULT_UNIVERSE = [
-    "RELIANCE.NS","TCS.NS","INFY.NS","HDFCBANK.NS","ICICIBANK.NS",
-    "HINDUNILVR.NS","BHARTIARTL.NS","KOTAKBANK.NS","LT.NS","SBIN.NS"
-]
-PERSIST_EVERY = 60
-DISCLAIMER = "⚠️ Disclaimer: Educational only. Not financial advice."
+MAX_UNIVERSE = 2500
 
-# ---------- Helpers ----------
-def candidate_variants(symbol: str) -> List[str]:
-    s = symbol.strip().upper()
-    if not s:
-        return []
-    # If user included suffix, try that first
-    if s.endswith(".NS") or s.endswith(".BO"):
-        return [s, s.replace(".BO", ".NS"), s.replace(".NS", ".BO"), s.rstrip(".NS").rstrip(".BO"), s.rstrip(".NS").rstrip(".BO")]
-    # else try NSE then BSE then raw
-    return [s + ".NS", s + ".BO", s]
+DEFAULT_UNIVERSE = ["RELIANCE.NS","TCS.NS","INFY.NS","HDFCBANK.NS","ICICIBANK.NS"]
 
-def safe_history_fetch(symbol: str, period="1y", attempts: int = 2, timeout_sec: int = 8):
-    """
-    Try to fetch history via yfinance, with a simple retry loop and explanatory message.
-    Returns (hist_df or None, info dict or {}, error_message or None)
-    """
-    last_err = None
-    for attempt in range(attempts):
+# ---------- Utilities ----------
+def now_ts() -> float:
+    return time.time()
+
+def cache_path_for(symbol: str, kind: str = "hist") -> str:
+    safe = symbol.replace("/", "_").replace(":", "_")
+    return os.path.join(CACHE_DIR, f"{safe}__{kind}.pkl")
+
+# Simple global rate limiter (process-level)
+_last_fetch_time = 0.0
+_last_fetch_lock = threading.Lock()
+def throttle_min_interval():
+    global _last_fetch_time
+    with _last_fetch_lock:
+        elapsed = time.time() - _last_fetch_time
+        if elapsed < RATE_LIMIT_MIN_INTERVAL:
+            to_sleep = RATE_LIMIT_MIN_INTERVAL - elapsed + random.random()*0.2
+            time.sleep(to_sleep)
+        _last_fetch_time = time.time()
+
+# Exponential backoff fetch wrapper
+def fetch_with_backoff(fetch_fn, attempts=4, base_sleep=1.0, max_sleep=16.0):
+    for i in range(attempts):
         try:
-            ticker = yf.Ticker(symbol)
-            # Use auto_adjust True for adjusted prices; you can change to False if you want raw OHLC.
-            hist = ticker.history(period=period, auto_adjust=True, timeout=timeout_sec)
-            if hist is None or hist.empty:
-                last_err = f"No data returned for {symbol}"
-                continue
-            info = {}
-            try:
-                info = ticker.info or {}
-            except Exception:
-                info = {}
-            return hist.sort_index(), info, None
+            throttle_min_interval()
+            return fetch_fn()
+        except Exception as e:
+            wait = min(max_sleep, base_sleep * (2 ** i)) + random.random()*0.5
+            time.sleep(wait)
+    raise RuntimeError("Max fetch attempts failed")
+
+# ---------- Fetching and caching ----------
+def save_cache(obj, path):
+    try:
+        with open(path, "wb") as f:
+            pickle.dump({"ts": now_ts(), "data": obj}, f)
+    except Exception:
+        pass
+
+def load_cache(path, ttl):
+    try:
+        if not os.path.exists(path):
+            return None
+        with open(path, "rb") as f:
+            d = pickle.load(f)
+        ts = d.get("ts", 0)
+        if now_ts() - ts > ttl:
+            return None
+        return d.get("data")
+    except Exception:
+        return None
+
+def fetch_history_yf_download(symbols: List[str], period="1y", interval="1d") -> Dict[str, pd.DataFrame]:
+    """
+    Use yf.download for a batch of tickers. Returns a dict symbol -> DataFrame (or None).
+    """
+    # build list string
+    tickers_str = " ".join(symbols)
+    def _call():
+        df = yf.download(tickers=tickers_str, period=period, interval=interval, group_by='ticker', progress=False, threads=True)
+        return df
+    raw = fetch_with_backoff(_call, attempts=3)
+    results = {}
+    # yf.download returns different shapes depending on number of tickers
+    if isinstance(raw, pd.DataFrame) and len(symbols) == 1:
+        results[symbols[0]] = raw
+        return results
+    for sym in symbols:
+        try:
+            if sym in raw.columns.levels[0]:
+                sub = raw[sym].dropna(how='all')
+                results[sym] = sub if not sub.empty else None
+            else:
+                # sometimes raw has no multilevel, try single level
+                # attempt to slice by column names starting with sym
+                candidates = [c for c in raw.columns if str(c).startswith(sym)]
+                if candidates:
+                    sub = raw[candidates]
+                    results[sym] = sub if not sub.empty else None
+                else:
+                    results[sym] = None
+        except Exception:
+            results[sym] = None
+    return results
+
+def safe_fetch_history(symbol: str, period="1y", use_cache_ttl=FETCH_TTL_SECONDS) -> Tuple[pd.DataFrame, str]:
+    """
+    Tries:
+     1) Load fresh cache
+     2) Try variants: symbol, symbol+'.NS', symbol+'.BO'
+     3) Use yf.download (batch of one)
+     4) Persist cache
+    Returns: (hist_df or None, resolved_symbol_or_error)
+    """
+    # normalize user input
+    s = symbol.strip()
+    if not s:
+        return None, "Empty symbol"
+    candidates = []
+    s_up = s.upper()
+    if s_up.endswith(".NS") or s_up.endswith(".BO"):
+        candidates = [s_up, s_up.replace(".BO", ".NS"), s_up.replace(".NS", ".BO"), s_up.split(".")[0]]
+    else:
+        candidates = [s_up, s_up + ".NS", s_up + ".BO"]
+    # try cache first for each candidate
+    for cand in candidates:
+        path = cache_path_for(cand, "hist")
+        cached = load_cache(path, use_cache_ttl)
+        if cached is not None:
+            return cached, cand + " (cache)"
+    # attempt batch download of candidates (reduces repeated calls)
+    try:
+        batch_result = fetch_history_yf_download(candidates, period=period)
+        for cand in candidates:
+            df = batch_result.get(cand)
+            if df is not None and not df.empty:
+                save_cache(df, cache_path_for(cand, "hist"))
+                return df, cand + " (download)"
+    except Exception as e:
+        # proceed to single-call fallback
+        pass
+    # single fallback with backoff
+    for cand in candidates:
+        try:
+            def _call():
+                return yf.Ticker(cand).history(period=period, interval="1d", auto_adjust=True)
+            df = fetch_with_backoff(_call, attempts=3)
+            if df is not None and not df.empty:
+                save_cache(df, cache_path_for(cand, "hist"))
+                return df, cand + " (single)"
         except Exception as e:
             last_err = str(e)
-            time.sleep(0.3)
-    return None, {}, last_err
+    return None, f"No data (attempted {candidates})"
 
-def resolve_user_symbol(user_symbol: str, period="1y") -> Tuple[str, pd.DataFrame, dict, List[str]]:
-    """
-    Try candidate variants for the user's symbol and return the first successful one.
-    Returns (resolved_symbol or "", hist or None, info dict, list_of_attempts_and_results)
-    """
-    attempts_log = []
-    for cand in candidate_variants(user_symbol):
-        if not cand:
-            continue
-        hist, info, err = safe_history_fetch(cand, period=period, attempts=2)
-        if hist is not None:
-            attempts_log.append((cand, "OK"))
-            return cand, hist, info, attempts_log
-        else:
-            attempts_log.append((cand, f"FAIL: {err}"))
-    # none worked
-    return "", None, {}, attempts_log
-
-def calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    delta = series.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=period, min_periods=1).mean()
-    avg_loss = loss.rolling(window=period, min_periods=1).mean().replace(0, np.nan)
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.fillna(50)
-
-def add_basic_tech(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    for p in (5, 10, 20, 50):
-        df[f"MA{p}"] = df["Close"].rolling(p, min_periods=1).mean()
-    df["RSI"] = calc_rsi(df["Close"])
-    exp1 = df["Close"].ewm(span=12, adjust=False).mean()
-    exp2 = df["Close"].ewm(span=26, adjust=False).mean()
-    df["MACD"] = exp1 - exp2
-    df["MACD_Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
-    df["Volatility"] = df["Close"].pct_change().rolling(20, min_periods=1).std() * np.sqrt(252) * 100
-    return df
-
-# ---------- Simple online models (same pattern as before) ----------
+# ---------- Simple online learner (lightweight) ----------
 class OnlineReg:
-    def __init__(self, n_features, lr=0.005):
-        self.w = np.zeros(n_features)
+    def __init__(self, dim):
+        self.w = np.zeros(dim)
         self.b = 0.0
-        self.lr = lr
+        self.lr = 0.004
     def predict(self, X):
         X = np.atleast_2d(X)
         return X.dot(self.w) + self.b
     def partial_fit(self, X, y):
-        if X.size == 0:
+        if getattr(X, "size", 0) == 0:
             return
         preds = self.predict(X)
         errs = preds - y
@@ -127,82 +189,54 @@ class OnlineReg:
         self.w = s.get("w", self.w)
         self.b = s.get("b", self.b)
 
-class OnlineClf:
-    def __init__(self, n_features, lr=0.01):
-        self.w = np.zeros(n_features)
-        self.b = 0.0
-        self.lr = lr
-    def _sigmoid(self, z):
-        z = np.clip(z, -50, 50)
-        return 1.0/(1.0+np.exp(-z))
-    def predict_proba(self, X):
-        z = X.dot(self.w) + self.b
-        return self._sigmoid(z)
-    def partial_fit(self, X, y):
-        if X.size == 0:
-            return
-        p = self.predict_proba(X)
-        errs = p - y
-        grad_w = (errs[:,None] * X).mean(axis=0)
-        grad_b = errs.mean()
-        self.w -= self.lr * grad_w
-        self.b -= self.lr * grad_b
-    def state(self):
-        return {"w": self.w, "b": self.b}
-    def load_state(self, s):
-        self.w = s.get("w", self.w)
-        self.b = s.get("b", self.b)
-
-def build_features(df, n_lags=N_LAGS):
+def build_features(df: pd.DataFrame, n_lags=N_LAGS):
     if df is None or len(df) < n_lags + 8:
         return np.empty((0, n_lags+3)), np.empty((0,))
     close = df["Close"].values
-    returns = (close[1:] - close[:-1])/ (close[:-1] + 1e-12)
-    ma20 = df["Close"].rolling(20, min_periods=1).mean().values
-    ma50 = df["Close"].rolling(50, min_periods=1).mean().values
-    rsi = calc_rsi(df["Close"]).values
+    returns = (close[1:] - close[:-1]) / (close[:-1] + 1e-12)
+    ma20 = pd.Series(close).rolling(20, min_periods=1).mean().values
+    ma50 = pd.Series(close).rolling(50, min_periods=1).mean().values
+    rsi = (pd.Series(close).diff().apply(lambda x: max(x,0)).rolling(14,min_periods=1).mean() / 
+           (pd.Series(close).diff().apply(lambda x: max(-x,0)).rolling(14,min_periods=1).mean().replace(0,np.nan))).fillna(1).values
     X, y = [], []
     for i in range(n_lags, len(returns)):
         lag = returns[i-n_lags:i]
         idx = i+1
         price = close[idx] if idx < len(close) else close[-1]
         ma_diff = (ma20[idx] - ma50[idx]) / (price if price != 0 else 1)
-        rsi_n = (rsi[idx]/100.0) if idx < len(rsi) else 0.5
-        vol = float(np.std(returns[max(0, i-20): i+1])) if i>=1 else 0.0
+        rsi_n = rsi[idx] if idx < len(rsi) else 1.0
+        vol = float(np.std(returns[max(0,i-20):i+1])) if i>=1 else 0.0
         feat = np.concatenate([lag, [ma_diff, rsi_n, vol]])
         X.append(feat)
         y.append(returns[i])
     return np.array(X), np.array(y)
 
-# ---------- Background learner ----------
 class BackgroundLearner:
-    def __init__(self, path=MODEL_FILE):
-        self.path = path
-        self.n_lags = N_LAGS
-        self.reg = OnlineReg(self.n_lags+3)
-        self.clf = OnlineClf(self.n_lags+3)
+    def __init__(self, model_file=MODEL_FILE):
+        self.model_file = model_file
+        self.dim = N_LAGS + 3
+        self.reg = OnlineReg(self.dim)
         self.universe = DEFAULT_UNIVERSE.copy()
         self.metrics = {"dir_acc_ema": 0.5, "mae_ema": 0.5, "samples": 0}
-        self.ema_alpha = 0.05
+        self.ema_alpha = 0.04
         self._stop = threading.Event()
         self._thread = None
         self.lock = threading.Lock()
         self._load()
     def _load(self):
-        if os.path.exists(self.path):
+        if os.path.exists(self.model_file):
             try:
-                with open(self.path, "rb") as f:
-                    d = pickle.load(f)
-                self.reg.load_state(d.get("reg", {}))
-                self.clf.load_state(d.get("clf", {}))
-                self.universe = d.get("universe", self.universe)[:MAX_UNIVERSE]
-                self.metrics.update(d.get("metrics", {}))
+                with open(self.model_file, "rb") as f:
+                    obj = pickle.load(f)
+                self.reg.load_state(obj.get("reg", {}))
+                self.universe = obj.get("universe", self.universe)[:MAX_UNIVERSE]
+                self.metrics.update(obj.get("metrics", {}))
             except Exception:
                 pass
     def _persist(self):
         try:
-            with open(self.path, "wb") as f:
-                pickle.dump({"reg": self.reg.state(), "clf": self.clf.state(), "universe": self.universe, "metrics": self.metrics}, f)
+            with open(self.model_file, "wb") as f:
+                pickle.dump({"reg": self.reg.state(), "universe": self.universe, "metrics": self.metrics}, f)
         except Exception:
             pass
     def start(self):
@@ -216,9 +250,10 @@ class BackgroundLearner:
         if self._thread:
             self._thread.join(timeout=2)
         self._persist()
-    def add_to_universe(self, symbol):
-        if symbol not in self.universe:
-            self.universe.append(symbol)
+    def add_to_universe(self, symbol: str):
+        sym = symbol.upper()
+        if sym not in self.universe:
+            self.universe.insert(0, sym)
             self.universe = self.universe[:MAX_UNIVERSE]
     def _loop(self):
         while not self._stop.is_set():
@@ -226,235 +261,238 @@ class BackgroundLearner:
                 if not self.universe:
                     time.sleep(10); continue
                 batch = random.sample(self.universe, min(BG_BATCH_SIZE, len(self.universe)))
-                dir_scores = []
-                maes = []
-                sample_count = 0
+                batch_dir_accs, batch_maes, batch_samples = [], [], 0
                 for s in batch:
-                    df = safe_history_fetch(s, period="400d")[0]
-                    if df is None or len(df) < self.n_lags + 8:
-                        continue
-                    X, y = build_features(df, self.n_lags)
+                    # try to use cached long history first (larger TTL for background learner)
+                    hist = load_cache(cache_path_for(s, "hist"), HIST_TTL_SECONDS)
+                    if hist is None:
+                        try:
+                            hist, _ = safe_fetch_history(s, period="400d")
+                            if hist is None:
+                                continue
+                        except Exception:
+                            continue
+                    X, y = build_features(hist, N_LAGS)
                     if X.size == 0:
                         continue
                     preds = self.reg.predict(X)
                     mae = float(np.mean(np.abs(preds - y)))
                     dir_acc = float(np.mean(np.sign(preds) == np.sign(y)))
-                    self.clf.partial_fit(X, (y > 0).astype(int))
+                    # incremental update
                     self.reg.partial_fit(X, y)
-                    dir_scores.append(dir_acc); maes.append(mae)
-                    sample_count += len(y)
+                    batch_dir_accs.append(dir_acc); batch_maes.append(mae)
+                    batch_samples += len(y)
+                    # gentle sleep to avoid bursts
                     time.sleep(0.02)
-                if sample_count > 0:
-                    a = self.ema_alpha
-                    batch_dir = float(np.mean(dir_scores)) if dir_scores else 0.0
-                    batch_mae = float(np.mean(maes)) if maes else 0.0
+                if batch_samples > 0:
                     with self.lock:
-                        self.metrics["dir_acc_ema"] = a * batch_dir + (1-a) * self.metrics["dir_acc_ema"]
-                        self.metrics["mae_ema"] = a * batch_mae + (1-a) * self.metrics["mae_ema"]
-                        self.metrics["samples"] += sample_count
+                        a = self.ema_alpha
+                        if batch_dir_accs:
+                            batch_dir = float(np.mean(batch_dir_accs))
+                            self.metrics["dir_acc_ema"] = a * batch_dir + (1 - a) * self.metrics["dir_acc_ema"]
+                        if batch_maes:
+                            batch_mae = float(np.mean(batch_maes))
+                            self.metrics["mae_ema"] = a * batch_mae + (1 - a) * self.metrics["mae_ema"]
+                        self.metrics["samples"] += batch_samples
                     self._persist()
-                time.sleep(BG_INTERVAL)
+                time.sleep(BG_INTERVAL + random.random()*5)
             except Exception:
-                time.sleep(BG_INTERVAL)
+                time.sleep(BG_INTERVAL + random.random()*3)
     def get_metrics(self):
         with self.lock:
             return dict(self.metrics)
-    def predict_for(self, symbol):
-        # returns daily_return_est, confidence (0..1)
-        df = safe_history_fetch(symbol, period="300d")[0]
-        if df is None or len(df) < self.n_lags + 8:
-            return 0.0, 0.0
-        X, _ = build_features(df, self.n_lags)
+    def predict_for(self, symbol: str, days: int = 7):
+        # returns estimated_return_per_day (signed), confidence (0..1)
+        hist = load_cache(cache_path_for(symbol, "hist"), HIST_TTL_SECONDS)
+        if hist is None:
+            hist, _ = safe_fetch_history(symbol, period="300d")
+            if hist is None:
+                return 0.0, 0.0
+        X, _ = build_features(hist, N_LAGS)
         if X.size == 0:
             return 0.0, 0.0
         latest = X[-1].reshape(1, -1)
-        pred = float(self.reg.predict(latest)[0])
-        prob_up = float(self.clf.predict_proba(latest)[0])
-        recent_returns = (df["Close"].values[1:] - df["Close"].values[:-1]) / (df["Close"].values[:-1] + 1e-12)
+        est = float(self.reg.predict(latest)[0])
+        # confidence heuristic: more data -> more confidence, lower volatility -> higher confidence
+        recent_returns = (hist["Close"].values[1:] - hist["Close"].values[:-1]) / (hist["Close"].values[:-1] + 1e-12)
         vol = float(np.std(recent_returns[-60:])) if len(recent_returns) >= 1 else 0.0
-        conf = max(0.0, min(0.99, prob_up * (1.0 - min(0.8, vol * 4.0))))
-        signed = pred * (prob_up * 2 - 1)
-        signed = float(np.clip(signed, -0.9, 0.9))
-        return signed, conf
-    def scan_high_potential(self, min_pct=10.0, days=7, samples=200):
-        res = []
+        data_factor = min(0.99, 0.1 + min(1.0, len(hist)/250.0))
+        conf = max(0.01, min(0.99, data_factor * (1.0 - vol * 3.0)))
+        # scale est to be realistic bounds
+        est = float(np.clip(est, -0.6, 0.6))
+        return est, conf
+
+    def scan_high_potential(self, min_pct=10.0, days=7, sample_limit=400):
+        results = []
         if not self.universe:
-            return res
-        samp = random.sample(self.universe, min(samples, len(self.universe)))
-        for s in samp:
+            return results
+        pool = random.sample(self.universe, min(sample_limit, len(self.universe)))
+        for s in pool:
             try:
-                daily, conf = self.predict_for(s)
-                expected_pct = daily * np.sqrt(max(1, days)) * 100
-                if abs(expected_pct) >= abs(min_pct) and conf > 0.08:
-                    hist = safe_history_fetch(s, period="120d")[0]
+                est_daily, conf = self.predict_for(s, days=days)
+                # rough scale for multi-day horizon: sqrt scaling
+                est_pct = est_daily * (days ** 0.5) * 100
+                if abs(est_pct) >= abs(min_pct) and conf > 0.12:
+                    hist = load_cache(cache_path_for(s, "hist"), HIST_TTL_SECONDS)
                     if hist is None:
-                        continue
+                        hist, _ = safe_fetch_history(s, period="120d")
+                        if hist is None: continue
                     cur = float(hist["Close"].iloc[-1])
-                    tgt = cur * (1 + daily * np.sqrt(max(1, days)))
-                    res.append({"symbol": s, "expected_pct": expected_pct, "confidence": conf, "current": cur, "target": tgt})
+                    tgt = cur * (1 + est_daily * (days ** 0.5))
+                    results.append({"symbol": s, "expected_pct": est_pct, "confidence": conf, "current": cur, "target": tgt})
             except Exception:
                 continue
-        res.sort(key=lambda r: abs(r["expected_pct"]), reverse=True)
-        return res[:30]
+        results.sort(key=lambda r: abs(r["expected_pct"]), reverse=True)
+        return results[:50]
 
-# ---------- trading plan helper ----------
-def compute_targets(current_price, predicted_return_frac, days):
-    entry = current_price
-    sl_pct = 0.03
-    stop = entry * (1 - sl_pct) if predicted_return_frac >= 0 else entry * (1 + sl_pct)
-    time_factor = np.sqrt(max(1, days/7))
-    t1 = entry * (1 + predicted_return_frac * 0.4 * time_factor)
-    t2 = entry * (1 + predicted_return_frac * 0.8 * time_factor)
-    t3 = entry * (1 + predicted_return_frac * 1.2 * time_factor)
-    t4 = entry * (1 + predicted_return_frac * 1.6 * time_factor)
-    risk = abs(entry - stop)
-    reward = abs(t2 - entry) if abs(t2 - entry) > 0 else 0.0
-    rr = (reward / risk) if risk > 0 else 0.0
-    return entry, stop, [t1, t2, t3, t4], rr
-
-# ---------- Streamlit UI ----------
-st.set_page_config(page_title="JINNI - Indian Stock AI", page_icon="🧞", layout="wide")
+# ---------- App ----------
+st.set_page_config(page_title="JINNI — Indian Stock Market AI", page_icon="🧞", layout="wide")
 st.title("🧞 JINNI — Indian Stock Market AI")
-st.markdown(DISCLAIMER)
+st.caption("Background training runs automatically. ⚠️ Educational only — not financial advice.")
 
-# instantiate BG in session_state
+# Background learner instantiation
 if "bg" not in st.session_state:
     st.session_state.bg = BackgroundLearner()
     st.session_state.bg.start()
 BG = st.session_state.bg
 
-# Sidebar
+# Sidebar controls
 with st.sidebar:
     st.header("Controls")
-    user_symbol = st.text_input("Enter stock symbol (e.g., RELIANCE or RELIANCE.NS)", value="IDBI")
-    pred_days = st.slider("Prediction horizon (days)", 1, 14, 7)
+    user_symbol = st.text_input("Enter stock symbol (e.g., RELIANCE or RELIANCE.NS)", value="RELIANCE")
+    pred_days = st.slider("Prediction horizon (days)", min_value=1, max_value=14, value=7)
     st.markdown("---")
     st.subheader("Recommendations")
     if st.button("Find 10%+ Weekly Opportunities"):
-        with st.spinner("Scanning (this samples BG universe)..."):
-            recs = BG.scan_high_potential(min_pct=10.0, days=7, samples=350)
+        with st.spinner("Scanning universe (this samples cached/history data)..."):
+            recs = BG.scan_high_potential(min_pct=10.0, days=7, sample_limit=400)
             st.session_state["last_recs"] = recs
-            st.success(f"Scan finished — {len(recs)} candidates found (top results stored).")
+            st.success(f"Scan finished — {len(recs)} candidates (top stored).")
     st.markdown("---")
     st.subheader("Model (background)")
     m = BG.get_metrics()
     st.metric("Directional accuracy (EMA)", f"{m['dir_acc_ema']*100:.2f}%")
     st.metric("MAE (EMA)", f"{m['mae_ema']:.4f}")
-    st.markdown(f"Trained samples: {m['samples']:,}")
+    st.write(f"Trained samples: {m['samples']:,}")
 
-# Main area
+# Main area: Resolve and fetch history (robust)
 st.header("Stock Analysis")
-resolved, hist, info, attempts = resolve_user_symbol(user_symbol, period="2y")
-if resolved:
-    st.success(f"Resolved symbol: {resolved}")
-    if attempts:
-        st.write("Attempts log (tried candidates):")
-        for a, r in attempts:
-            st.write(f"- {a}: {r}")
-    hist = add_basic_tech(hist)
-    company = info.get("longName") or info.get("shortName") or resolved
-    st.subheader(f"{company} — {resolved}")
-    last = float(hist["Close"].iloc[-1])
-    prev = float(hist["Close"].iloc[-2]) if len(hist)>1 else last
-    st.metric("Last Close", f"₹{last:.2f}", f"{(last-prev):+.2f} ({(last-prev)/prev*100:+.2f}%)")
-    # plot
-    def plot_chart(df):
-        fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.6,0.2,0.2])
-        fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Price"), row=1, col=1)
-        if "MA20" in df.columns:
-            fig.add_trace(go.Scatter(x=df.index, y=df["MA20"], name="MA20"), row=1, col=1)
-        fig.add_trace(go.Bar(x=df.index, y=df["Volume"], name="Volume"), row=2, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df["RSI"], name="RSI"), row=3, col=1)
-        fig.update_layout(height=700, showlegend=True)
-        return fig
-    st.plotly_chart(plot_chart(hist), use_container_width=True)
+hist, resolved = None, None
+with st.spinner("Resolving symbol and fetching data (cache-aware)..."):
+    df, resolved = safe_fetch_history(user_symbol, period="2y")
+    if df is not None:
+        hist = df.copy()
+        # persist to background hist cache with longer TTL
+        save_cache(hist, cache_path_for(resolved.split()[0], "hist"))
 
-    # model prediction
-    daily, conf = BG.predict_for(resolved)
-    pred_price = last * (1 + daily * np.sqrt(max(1, pred_days)))
-    pred_pct = (pred_price - last)/last*100
-    # fallback if conf low
-    if conf < 0.12:
-        fallback = hist["Close"].pct_change().tail(5).mean() * np.sqrt(max(1, pred_days)) * 100
-        pred_price = 0.6 * pred_price + 0.4 * last * (1 + fallback/100)
-        pred_pct = (pred_price - last)/last*100
+if hist is None:
+    st.error("Could not resolve the symbol or fetch market data. Attempts were made; see messages below.")
+    st.info("Tip: Try adding .NS for NSE symbols (e.g., RELIANCE.NS) or wait a few minutes if Yahoo rate-limited you.")
+    st.stop()
 
-    # signal
-    if pred_pct >= 15:
-        sig = "STRONG BUY"; box_style="background:#d4edda;padding:12px;border-left:4px solid #28a745;border-radius:8px"
-    elif pred_pct >=5:
-        sig="BUY"; box_style="background:#d4edda;padding:12px;border-left:4px solid #28a745;border-radius:8px"
-    elif pred_pct <= -15:
-        sig="STRONG SELL"; box_style="background:#f8d7da;padding:12px;border-left:4px solid #dc3545;border-radius:8px"
-    elif pred_pct <= -5:
-        sig="SELL"; box_style="background:#f8d7da;padding:12px;border-left:4px solid #dc3545;border-radius:8px"
-    else:
-        sig="HOLD"; box_style="background:#fff3cd;padding:12px;border-left:4px solid #ffc107;border-radius:8px"
+# Add basic indicators
+def add_basic_tech(df):
+    df = df.copy()
+    df["MA20"] = df["Close"].rolling(20, min_periods=1).mean()
+    df["MA50"] = df["Close"].rolling(50, min_periods=1).mean()
+    df["RSI"] = df["Close"].diff().apply(lambda x: max(x,0)).rolling(14,min_periods=1).mean() / \
+                df["Close"].diff().apply(lambda x: max(-x,0)).rolling(14,min_periods=1).mean().replace(0,np.nan)
+    df["RSI"] = (100 - (100 / (1 + df["RSI"]))).fillna(50)
+    exp1 = df["Close"].ewm(span=12, adjust=False).mean()
+    exp2 = df["Close"].ewm(span=26, adjust=False).mean()
+    df["MACD"] = exp1 - exp2
+    return df
 
-    st.markdown(f"<div style='{box_style}'><h3>🔮 AI Prediction: {sig}</h3><h2>₹{pred_price:.2f}</h2><p>{pred_pct:+.2f}% in {pred_days} days</p><p>Model confidence: {conf*100:.1f}%</p></div>", unsafe_allow_html=True)
+hist = add_basic_tech(hist)
+company = resolved.split()[0]
+st.subheader(f"{company}")
 
-    entry, sl, targets, rr = compute_targets(last, pred_pct/100.0, pred_days)
-    st.subheader("Trading Plan")
-    st.write(f"- Entry: ₹{entry:.2f}")
-    st.write(f"- Stop Loss: ₹{sl:.2f}")
-    for i,t in enumerate(targets,1):
-        st.write(f"- Target {i}: ₹{t:.2f} ({(t-entry)/entry*100:+.1f}%)")
-    st.write(f"- Est Risk-Reward (Target 2): 1:{rr:.2f}")
+last_price = float(hist["Close"].iloc[-1])
+prev = float(hist["Close"].iloc[-2]) if len(hist)>1 else last_price
+st.metric("Last Close", f"₹{last_price:.2f}", f"{(last_price-prev):+.2f} ({(last_price-prev)/prev*100:+.2f}%)")
 
-    st.subheader("Technical Snapshot")
-    rsi_val = float(hist["RSI"].iloc[-1])
-    macd = float(hist["MACD"].iloc[-1])
-    macd_sig = float(hist["MACD_Signal"].iloc[-1])
-    ma50 = float(hist["MA50"].iloc[-1]) if "MA50" in hist.columns else last
-    vol = float(hist["Volatility"].iloc[-1])
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("RSI (14)", f"{rsi_val:.1f}", "Overbought" if rsi_val>70 else ("Oversold" if rsi_val<30 else "Neutral"))
-    c2.metric("MACD", f"{macd:.3f}", "Bullish" if macd>macd_sig else "Bearish")
-    c3.metric("Trend (vs MA50)", "Bullish" if last>ma50 else "Bearish")
-    c4.metric("Volatility (ann %)", f"{vol:.2f}%")
+# Chart
+def plot_chart(df):
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.6,0.2,0.2])
+    fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Price"), row=1, col=1)
+    if "MA20" in df.columns: fig.add_trace(go.Scatter(x=df.index, y=df["MA20"], name="MA20"), row=1, col=1)
+    if "MA50" in df.columns: fig.add_trace(go.Scatter(x=df.index, y=df["MA50"], name="MA50"), row=1, col=1)
+    fig.add_trace(go.Bar(x=df.index, y=df["Volume"], name="Volume"), row=2, col=1)
+    if "RSI" in df.columns: fig.add_trace(go.Scatter(x=df.index, y=df["RSI"], name="RSI"), row=3, col=1)
+    fig.update_layout(height=700, showlegend=True)
+    return fig
 
-    st.subheader("Fundamentals (yfinance)")
-    pe = info.get("trailingPE")
-    pb = info.get("priceToBook")
-    mc = info.get("marketCap")
-    f1, f2, f3 = st.columns(3)
-    f1.metric("P/E", f"{pe:.2f}" if pe else "N/A")
-    f2.metric("P/B", f"{pb:.2f}" if pb else "N/A")
-    f3.metric("Market Cap (Cr)", f"₹{mc/1e7:.2f} Cr" if mc else "N/A")
+st.plotly_chart(plot_chart(hist), use_container_width=True)
 
-    st.subheader("Model metrics & reasoning")
-    mm = BG.get_metrics()
-    st.write(f"- Directional accuracy (EMA): {mm['dir_acc_ema']*100:.2f}%")
-    st.write(f"- MAE (EMA): {mm['mae_ema']:.4f}")
-    st.write(f"- Samples trained: {mm['samples']:,}")
-    st.write("**Why prediction:**")
-    st.write(f"- Recent 5-day mean return: {hist['Close'].pct_change().tail(5).mean()*100:+.2f}%")
-    st.write(f"- RSI: {rsi_val:.1f}")
-    st.write(f"- MA50 position: {'above' if last>ma50 else 'below'} MA50")
+# Prediction using background learner
+est_daily, conf = BG.predict_for(resolved.split()[0], days=pred_days)
+pred_price = last_price * (1 + est_daily * (pred_days ** 0.5))
+pred_pct = (pred_price - last_price) / last_price * 100
 
-    # allow adding to training universe explicitly
-    if st.button("Add this resolved symbol to background training universe"):
-        BG.add_to_universe(resolved)
-        st.success(f"Added {resolved} to training universe.")
+# If confidence low, use fallback simple momentum estimate
+if conf < 0.12:
+    fallback_daily = hist["Close"].pct_change().tail(5).mean()
+    fallback_price = last_price * (1 + fallback_daily * (pred_days ** 0.5))
+    pred_price = 0.55 * pred_price + 0.45 * fallback_price
+    pred_pct = (pred_price - last_price)/last_price*100
 
+# Signal & trading plan
+if pred_pct >= 15:
+    sig = "🔵 STRONG BUY"; style = "background:#d4edda;padding:12px;border-left:4px solid #28a745;border-radius:8px"
+elif pred_pct >= 5:
+    sig = "🟢 BUY"; style = "background:#d4edda;padding:12px;border-left:4px solid #28a745;border-radius:8px"
+elif pred_pct <= -15:
+    sig = "🔴 STRONG SELL"; style = "background:#f8d7da;padding:12px;border-left:4px solid #dc3545;border-radius:8px"
+elif pred_pct <= -5:
+    sig = "🔴 SELL"; style = "background:#f8d7da;padding:12px;border-left:4px solid #dc3545;border-radius:8px"
 else:
-    st.error("Could not resolve the symbol or fetch market data. Attempts:")
-    st.write("Tried candidates (symbol: result):")
-    _, _, _, attempts = resolve_user_symbol(user_symbol, period="2y")
-    for a, r in attempts:
-        st.write(f"- {a}: {r}")
-    st.info("Tip: Try adding .NS for NSE symbols (e.g., RELIANCE.NS). Some BSE tickers may not be present on Yahoo Finance.")
+    sig = "⚪ HOLD"; style = "background:#fff3cd;padding:12px;border-left:4px solid #ffc107;border-radius:8px"
 
-# show last scan results if present
-if "last_recs" in st.session_state and st.session_state["last_recs"]:
+st.markdown(f"<div style='{style}'><h3>Prediction: {sig}</h3><h2>₹{pred_price:.2f}</h2><p>{pred_pct:+.2f}% in {pred_days} days</p><p>Model confidence: {conf*100:.1f}%</p></div>", unsafe_allow_html=True)
+
+# Targets
+entry, stop, targets, rr = (lambda cur, ret, days: (
+    cur,
+    cur*(1-0.03) if ret>=0 else cur*(1+0.03),
+    [cur*(1 + ret*mult*(days**0.5)) for mult in (0.4,0.8,1.2,1.6)],
+    max(0.0, (abs(cur*(1 + ret*0.8) - cur) / (abs(cur*(1-0.03) - cur)) if abs(cur*(1-0.03) - cur) > 1e-9 else 0.0))
+))(last_price, pred_pct/100.0, pred_days)
+
+st.subheader("Trading Plan")
+st.write(f"- Entry: ₹{entry:.2f}")
+st.write(f"- Stop Loss: ₹{stop:.2f}")
+for i, t in enumerate(targets, 1):
+    st.write(f"- Target {i}: ₹{t:.2f} ({(t-entry)/entry*100:+.1f}%)")
+st.write(f"- Est risk-reward (T2): 1:{rr:.2f}")
+
+# Technical snapshot
+st.subheader("Technical Snapshot")
+rsi_val = float(hist["RSI"].iloc[-1]) if "RSI" in hist.columns else np.nan
+macd_val = float(hist["MACD"].iloc[-1]) if "MACD" in hist.columns else np.nan
+ma50_val = float(hist["MA50"].iloc[-1]) if "MA50" in hist.columns else last_price
+vol = float(hist["Close"].pct_change().rolling(20).std().iloc[-1])*np.sqrt(252)*100 if len(hist)>1 else 0.0
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("RSI (14)", f"{rsi_val:.1f}", "Overbought" if rsi_val>70 else ("Oversold" if rsi_val<30 else "Neutral"))
+c2.metric("MACD", f"{macd_val:.3f}", "Bullish" if macd_val>0 else "Bearish")
+c3.metric("Trend (MA50)", "Bullish" if last_price>ma50_val else "Bearish")
+c4.metric("Volatility (ann %)", f"{vol:.2f}%")
+
+# Add to BG universe
+if st.button("Add this symbol to background training universe"):
+    BG.add_to_universe(resolved.split()[0])
+    st.success(f"Added {resolved.split()[0]} to training universe (will be sampled by background learner).")
+
+# Show last recommendations if present
+if "last_recs" in st.session_state and st.session_state.last_recs:
     st.markdown("---")
-    st.header("Last Recommendations (from scan)")
-    for r in st.session_state["last_recs"][:12]:
-        with st.expander(f"{r['symbol']} — Est {r['expected_pct']:+.1f}% | Conf {r['confidence']:.2f}"):
-            st.write(f"Current: ₹{r['current']:.2f} | Target: ₹{r['target']:.2f} | Conf: {r['confidence']:.2f}")
+    st.subheader("Last scan results")
+    for r in st.session_state.last_recs[:12]:
+        with st.expander(f"{r['symbol']} — {r['expected_pct']:+.1f}% | Conf {r['confidence']:.2f}"):
+            st.write(f"Current: ₹{r['current']:.2f} | Target: ₹{r['target']:.2f}")
             if st.button(f"Analyze {r['symbol']}", key=f"an_{r['symbol']}"):
                 st.experimental_set_query_params(symbol=r['symbol'])
                 st.experimental_rerun()
 
 st.markdown("---")
-st.markdown("<small>Background learner trains automatically. If a symbol cannot be resolved it likely isn't available on Yahoo Finance under that ticker. Try NSE (.NS) or BSE (.BO) variants.</small>", unsafe_allow_html=True)
+st.caption("Notes: This app caches fetched history and uses a rate-limited fetcher with backoff to avoid Yahoo rate limits. Background learner uses cached hist where available and trains in the background.")
+
