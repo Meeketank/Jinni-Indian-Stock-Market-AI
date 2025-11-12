@@ -786,7 +786,6 @@ def run_comprehensive_analysis():
     st.header("🎯 Investment Conclusion")
     
     conclusion_col1, conclusion_col2 = st.columns([2, 1])
-        
         with conclusion_col1:
             # Display comprehensive recommendation
             recommendation = "STRONG BUY" if pred_return > 20 else "BUY" if pred_return > 10 else "HOLD" if pred_return > -5 else "SELL"
