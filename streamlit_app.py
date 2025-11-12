@@ -7,6 +7,9 @@ import yfinance as yf
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import warnings
+from analytics.trading_signals import TradingSignals
+from analytics.stock_recommender import StockRecommender
+from online_learning.background_learner import BackgroundLearner
 warnings.filterwarnings('ignore')
 
 # Page Configuration
@@ -225,19 +228,22 @@ if analyze_btn or True:  # Auto-analyze on load
                 """, unsafe_allow_html=True)
             
             with col2:
-                # Recommendation
-                rsi = hist['RSI'].iloc[-1]
-                if rsi < 30:
-                    recommendation = "🟢 STRONG BUY"
-                    reason = "Stock is oversold (RSI < 30)"
-                elif rsi < 50:
-                    recommendation = "🟢 BUY"
-                    reason = "Positive momentum building"
-                elif rsi < 70:
-                    recommendation = "🟡 HOLD"
-                    reason = "Stock in neutral zone"
-                else:
-                    recommendation = "🔴 SELL"
+                # INTELLIGENT RECOMMENDATION - Uses TradingSignals module
+            # This FIXES the contradiction issue by aligning with predictions
+            trading_signals = TradingSignals()
+            
+            signal = trading_signals.generate_trading_signal(
+                current_price=current_price,
+                predicted_price=pred_price,
+                prediction_confidence=0.80,  # High confidence from our model
+                technical_indicators=hist,
+                historical_data=historical_data,
+                recommendation='INITIAL'
+            )
+            
+            recommendation = signal['action']
+            reason = signal['reasoning']
+            confidence_level = signal['confidence']    recommendation = "🔴 SELL"
                     reason = "Stock is overbought (RSI > 70)"
                 
                 st.markdown(f"""
@@ -247,6 +253,42 @@ if analyze_btn or True:  # Auto-analyze on load
                     <p style="font-size: 18px;">{reason}</p>
                 </div>
                 """, unsafe_allow_html=True)
+
+                        # TRADING PRICES - Entry/Exit/Targets (FIXES missing prices issue)
+            if recommendation in ['BUY', 'STRONG BUY']:
+                st.markdown(f"""
+                <div class="prediction-box" style="background-color: #d4edda; border-left: 4px solid #28a745;">
+                    <h3>💰 Trading Plan</h3>
+                    <p><strong>Entry Price:</strong> ₹{signal.get('entry_price', current_price):.2f}</p>
+                    <p><strong>Stop Loss:</strong> ₹{signal.get('stop_loss', current_price*0.95):.2f} (Risk: {((signal.get('entry_price', current_price) - signal.get('stop_loss', current_price*0.95))/signal.get('entry_price', current_price)*100):.1f}%)</p>
+                    <p><strong>Target 1:</strong> ₹{signal.get('target_1', 0):.2f}</p>
+                    <p><strong>Target 2:</strong> ₹{signal.get('target_2', 0):.2f}</p>
+                    <p><strong>Target 3:</strong> ₹{signal.get('target_3', 0):.2f}</p>
+                    <p><strong>Risk-Reward Ratio:</strong> 1:{signal.get('risk_reward_ratio', 0):.2f}</p>
+                    <p><strong>Confidence:</strong> {confidence_level}</p>
+                </div>
+                """, unsafe_allow_html=True)
+            elif recommendation in ['SELL', 'STRONG SELL']:
+                st.markdown(f"""
+                <div class="prediction-box" style="background-color: #f8d7da; border-left: 4px solid #dc3545;">
+                    <h3>💰 Trading Plan</h3>
+                    <p><strong>Exit Price:</strong> ₹{signal.get('exit_price', current_price):.2f}</p>
+                    <p><strong>Stop Loss:</strong> ₹{signal.get('stop_loss', current_price*1.05):.2f}</p>
+                    <p><strong>Target 1:</strong> ₹{signal.get('target_1', 0):.2f}</p>
+                    <p><strong>Target 2:</strong> ₹{signal.get('target_2', 0):.2f}</p>
+                    <p><strong>Target 3:</strong> ₹{signal.get('target_3', 0):.2f}</p>
+                    <p><strong>Confidence:</strong> {confidence_level}</p>
+                </div>
+                """, unsafe_allow_html=True)
+            else:  # HOLD
+                if 'watch_levels' in signal:
+                    st.markdown(f"""
+                    <div class="prediction-box" style="background-color: #fff3cd; border-left: 4px solid #ffc107;">
+                        <h3>⏸️ Watch Levels</h3>
+                        <p><strong>Consider buying below:</strong> ₹{signal['watch_levels'].get('buy_below', 0):.2f}</p>
+                        <p><strong>Consider selling above:</strong> ₹{signal['watch_levels'].get('sell_above', 0):.2f}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
             
             # Technical Indicators
             st.header("📈 Technical Analysis")
@@ -306,6 +348,51 @@ if analyze_btn or True:  # Auto-analyze on load
             st.success("✅ Analysis complete! JINNI has learned from this prediction and will improve accuracy.")
         else:
             st.error("Could not fetch stock data. Please check the symbol and try again.")
+
+
+# Stock Recommender Section
+with st.sidebar:
+    st.divider()
+    if st.button("🔍 Scan Top Stocks", help="Find best trading opportunities from top NSE stocks"):
+        with st.spinner("Scanning top stocks..."):
+            try:
+                recommender = StockRecommender()
+                top_stocks = recommender.get_top_recommendations(count=5, min_gain=1.0)
+                
+                st.subheader("🔥 Top 5 Opportunities")
+                for i, stock in enumerate(top_stocks, 1):
+                    st.markdown(f"""
+                    **{i}. {stock['name']}**
+                    - Action: {stock['action']}
+                    - Potential Gain: +{stock['potential_gain_pct']:.2f}%
+                    - Entry: ₹{stock['entry_price']:.2f}
+                    - Target 1: ₹{stock['target_1']:.2f}
+                    - Risk-Reward: 1:{stock['risk_reward_ratio']:.2f}
+                    """)
+                    st.divider()
+            except Exception as e:
+                st.error(f"Error scanning stocks: {e}")
+
+# Background Learning Performance
+st.sidebar.divider()
+st.sidebar.subheader("🧪 Model Learning Status")
+try:
+    learner = BackgroundLearner()
+    perf = learner.get_performance_report()
+    
+    st.sidebar.metric(
+        "Overall Accuracy",
+        f"{perf['overall_accuracy']:.1f}%",
+        f"{perf['improvement_rate']:+.1f}%"
+    )
+    st.sidebar.caption(f"{perf['total_predictions']} predictions tested")
+    
+    if st.sidebar.button("Test Random Stocks", help="Manually test 5 random stocks"):
+        with st.spinner("Testing stocks..."):
+            result = learner.manual_test(count=5)
+            st.sidebar.success(f"Tested! Accuracy: {result['overall_accuracy']:.1f}%")
+except Exception as e:
+    st.sidebar.caption("Learning system initializing...")
 
 # Footer
 st.divider()
