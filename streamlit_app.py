@@ -97,24 +97,7 @@ class BackgroundLearner:
         self.lock = threading.Lock()
 
     def _default_universe(self) -> List[str]:
-        """Comprehensive list of Indian stocks"""
-        return [
-            # Nifty 50
-            "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS",
-            "HINDUNILVR.NS", "ITC.NS", "SBIN.NS", "BHARTIARTL.NS", "KOTAKBANK.NS",
-            "LT.NS", "AXISBANK.NS", "ASIANPAINT.NS", "MARUTI.NS", "SUNPHARMA.NS",
-            "TITAN.NS", "BAJFINANCE.NS", "ULTRACEMCO.NS", "NESTLEIND.NS", "WIPRO.NS",
-            "HCLTECH.NS", "TECHM.NS", "M&M.NS", "ONGC.NS", "NTPC.NS",
-            "POWERGRID.NS", "TATASTEEL.NS", "ADANIENT.NS", "BAJAJFINSV.NS", "COALINDIA.NS",
-            "TATAMOTORS.NS", "HINDALCO.NS", "JSWSTEEL.NS", "INDUSINDBK.NS", "BPCL.NS",
-            "CIPLA.NS", "DRREDDY.NS", "EICHERMOT.NS", "GRASIM.NS", "HEROMOTOCO.NS",
-            "DIVISLAB.NS", "APOLLOHOSP.NS", "BRITANNIA.NS", "SHRIRAMFIN.NS", "ADANIPORTS.NS",
-            "TATACONSUM.NS", "SBILIFE.NS", "BAJAJ-AUTO.NS", "LTIM.NS", "TRENT.NS",
-            # Additional popular stocks
-            "ZOMATO.NS", "PAYTM.NS", "NYKAA.NS", "IRCTC.NS", "IRFC.NS",
-            "RVNL.NS", "NBCC.NS", "PFC.NS", "RECLTD.NS", "HUDCO.NS",
-        ]    def _default_universe(self) -> List[str]:
-        """Return empty list - uses only user-provided stock"""
+"""Return empty list - uses only user-provided stock"""
         return []
     def start(self):
         if self._thread and self._thread.is_alive():
