@@ -113,8 +113,9 @@ class BackgroundLearner:
             # Additional popular stocks
             "ZOMATO.NS", "PAYTM.NS", "NYKAA.NS", "IRCTC.NS", "IRFC.NS",
             "RVNL.NS", "NBCC.NS", "PFC.NS", "RECLTD.NS", "HUDCO.NS",
-        ]
-
+        ]    def _default_universe(self) -> List[str]:
+        """Return empty list - uses only user-provided stock"""
+        return []
     def start(self):
         if self._thread and self._thread.is_alive():
             return
