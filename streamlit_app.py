@@ -234,7 +234,7 @@ if analyze_btn or True:  # Auto-analyze on load
             
             signal = trading_signals.generate_trading_signal(
                 current_price=current_price,
-                predicted_price=pred_price,
+                    predicted_price=pred_price,
                 prediction_confidence=0.80,  # High confidence from our model
                 technical_indicators=hist,
                 historical_data=historical_data,
