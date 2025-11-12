@@ -786,4 +786,84 @@ def run_comprehensive_analysis():
     st.header("🎯 Investment Conclusion")
     
     conclusion_col1, conclusion_col2 = st.columns([2, 1])
+        
+        with conclusion_col1:
+            # Display comprehensive recommendation
+            recommendation = "STRONG BUY" if pred_return > 20 else "BUY" if pred_return > 10 else "HOLD" if pred_return > -5 else "SELL"
+            
+            if recommendation == "STRONG BUY":
+                st.success(f"🎯 **Recommendation: {recommendation}**")
+                st.write("High conviction opportunity with strong technical and fundamental alignment.")
+            elif recommendation == "BUY":
+                st.info(f"📈 **Recommendation: {recommendation}**")
+                st.write("Positive outlook with good risk-reward setup.")
+            elif recommendation == "HOLD":
+                st.warning(f"⏸️ **Recommendation: {recommendation}**")
+                st.write("Neutral outlook - wait for better entry or confirmation.")
+            else:
+                st.error(f"⚠️ **Recommendation: {recommendation}**")
+                st.write("Negative outlook - consider reducing exposure.")
+        
+        with conclusion_col2:
+            st.metric("Confidence", f"{min(abs(pred_return) * 3, 95):.0f}%")
+            st.metric("Risk Level", "Low" if risk_score < 5 else "Medium" if risk_score < 7 else "High")
+    
+    except Exception as e:
+        st.error(f"❌ Analysis Error: {str(e)}")
+        st.info("💡 Try a different stock symbol or check your internet connection.")
+
+# CRITICAL: Button trigger logic - This is what makes the Analyze button actually work!
+if analyze_btn:
+    run_comprehensive_analysis()
+
+elif scan_btn:
+    with st.spinner("🔍 Scanning for high-opportunity stocks..."):
+        try:
+            recommendations = BG_LEARNER.get_high_return_recommendations(min_return=10, days=7)
+            
+            st.header("📊 Stock Scanner Results")
+            
+            if recommendations:
+                st.success(f"Found {len(recommendations)} high-potential opportunities!")
+                
+                # Create results table
+                scan_df = pd.DataFrame(recommendations)
+                scan_df = scan_df.sort_values('expected_return', ascending=False)
+                
+                # Display top opportunities
+                for idx, row in scan_df.head(10).iterrows():
+                    with st.expander(f"🎯 {row['symbol']} - Expected Return: {row['expected_return']:.1f}%"):
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Current Price", f"₹{row['current_price']:.2f}")
+                        with col2:
+                            st.metric("Target Price", f"₹{row['target_price']:.2f}")
+                        with col3:
+                            st.metric("Timeframe", f"{row['days']} days")
+            else:
+                st.warning("No high-confidence opportunities found at this time.")
+                st.info("Try adjusting the scanner parameters or check back later.")
+        
+        except Exception as e:
+            st.error(f"Scanner Error: {str(e)}")
+
+# Auto-refresh mechanism (every 60 seconds)
+if 'last_refresh' not in st.session_state:
+    st.session_state['last_refresh'] = time.time()
+
+current_time = time.time()
+if current_time - st.session_state['last_refresh'] > 60:
+    st.session_state['last_refresh'] = current_time
+    st.rerun()
+
+# Footer
+st.markdown("---")
+st.markdown("""
+<div style='text-align: center; color: #888; padding: 20px;'>
+    <p>⚠️ <strong>Disclaimer:</strong> This tool is for educational and informational purposes only.</p>
+    <p>Not financial advice. Always do your own research and consult with a qualified financial advisor.</p>
+    <p>Past performance does not guarantee future results. Stock markets involve risk.</p>
+    <p style='margin-top: 10px; font-size: 12px;'>JINNI AI © 2025 | Powered by Advanced ML Algorithms</p>
+</div>
+""", unsafe_allow_html=True)
     
