@@ -1,7 +1,13 @@
 # streamlit_app.py
 """
-JINNI - AI-Powered Indian Stock Market Analysis System (single-file)
-Fixed / hardened version (Streamlit-safe defaults and better error handling).
+JINNI - Indian Stock Market Analysis System (single-file)
+Complete fixed version with:
+ - robust symbol resolver + detailed debug
+ - ability to scan entire universe or limited subset
+ - robust fundamentals fetching with fallbacks
+ - combined technical + fundamental conclusion
+ - safer Streamlit controls (avoids ValueAboveMax errors)
+ - background learner with scan_high_potential improvements
 """
 
 import streamlit as st
@@ -22,6 +28,7 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 MODEL_PATH = os.path.join(CACHE_DIR, "background_model.pkl")
 SEARCH_CACHE = os.path.join(CACHE_DIR, "yahoo_search_cache.pkl")
 SYMBOLS_CACHE = os.path.join(CACHE_DIR, "universe_symbols.pkl")
+RESOLVE_DEBUG = os.path.join(CACHE_DIR, "resolve_debug.json")
 
 # Universe source fallback list
 FALLBACK_UNIVERSE = [
@@ -105,48 +112,104 @@ def yahoo_search_symbol(query: str) -> List[str]:
     return out
 
 def resolve_symbol(user_input: str, period="1y") -> Tuple[pd.DataFrame,str]:
-    """Resolve user-entered stock name/symbol to a ticker and return history dataframe (or (None,None))."""
+    """
+    Improved resolver:
+    - rejects cached empty DataFrames
+    - logs all candidate tickers tried
+    - tries more variants and a longer 'max' fallback before failing
+    - writes resolve_debug.json with attempts & last error for UI debugging
+    """
     if not user_input:
         return None, None
     s = user_input.strip()
-    candidates = []
-    # If looks like "RELIANCE.NS" try directly first
-    if "." in s:
-        candidates.append(s.upper())
-    # add naive variants
+    tried_candidates = []
+    last_err = None
+
+    def try_fetch(cand, per):
+        nonlocal last_err
+        try:
+            cache_path = os.path.join(CACHE_DIR, f"hist_{cand}.pkl")
+            hist = load_pickle(cache_path)
+            # reject if cached is None or empty
+            if hist is not None and isinstance(hist, pd.DataFrame) and not hist.empty:
+                return hist
+            # attempt direct yfinance history
+            throttle_fetch()
+            tk = yf.Ticker(cand)
+            df = tk.history(period=per, interval="1d", auto_adjust=True)
+            if df is not None and not df.empty:
+                save_pickle(df, cache_path)
+                return df
+            # fallback yf.download (sometimes more reliable)
+            throttle_fetch()
+            try:
+                df2 = yf.download(cand, period=per, interval="1d", progress=False, auto_adjust=True)
+            except Exception:
+                df2 = None
+            if isinstance(df2, pd.DataFrame) and not df2.empty:
+                save_pickle(df2, cache_path)
+                return df2
+            last_err = f"No data for {cand} with period={per}"
+            return None
+        except Exception as e:
+            last_err = f"{cand} fetch error: {e}"
+            return None
+
+    # build candidate list (aggressive)
     s_up = s.upper()
-    for v in [s_up, s_up + ".NS", s_up + ".BO", s_up + ".NSE", s_up + ".BSE"]:
-        if v not in candidates:
-            candidates.append(v)
-    # add Yahoo suggestions (prefer them first)
+    base = s_up.rstrip(".NS").rstrip(".BO").rstrip(".BSE").rstrip(".NSE")
+    candidates = []
+    suffixes = ["", ".NS", ".BO", ".BSE", ".NSE"]
+    for suf in suffixes:
+        cand = (base + suf).upper()
+        if cand not in candidates:
+            candidates.append(cand)
+    # include original input variant if it had punctuation or extras
+    if s_up not in candidates:
+        candidates.insert(0, s_up)
+    # include Yahoo suggestions if possible (prefer them)
     try:
         ycs = yahoo_search_symbol(s)
-        for yc in reversed(ycs):
+        for yc in ycs:
             if yc not in candidates:
                 candidates.insert(0, yc)
     except Exception:
         pass
 
-    last_err = None
+    # Try candidates with requested period
     for c in candidates:
-        try:
-            cache_path = os.path.join(CACHE_DIR, f"hist_{c}.pkl")
-            hist = load_pickle(cache_path)
-            if hist is not None and not hist.empty:
-                return hist, c
-            throttle_fetch()
-            tk = yf.Ticker(c)
-            df = tk.history(period=period, interval="1d", auto_adjust=True)
-            if df is not None and not df.empty:
-                save_pickle(df, cache_path)
-                return df, c
-            else:
-                last_err = f"No data for {c}"
-        except Exception as e:
-            last_err = str(e)
-            time.sleep(0.2)
-            continue
-    log_error(f"resolve_symbol failed for {user_input}. Tried {candidates}. Last err: {last_err}")
+        tried_candidates.append(c)
+        df = try_fetch(c, period)
+        if df is not None:
+            try:
+                # write debug success
+                with open(RESOLVE_DEBUG, "w") as f:
+                    json.dump({"query": user_input, "success": c, "tried": tried_candidates, "last_err": None}, f)
+            except Exception:
+                pass
+            log_error(f"resolve_symbol success for {user_input} -> {c}")
+            return df, c
+
+    # Final retry with 'max' for top few candidates
+    for c in candidates[:6]:
+        tried_candidates.append(f"{c} (retry max)")
+        df = try_fetch(c, "max")
+        if df is not None:
+            try:
+                with open(RESOLVE_DEBUG, "w") as f:
+                    json.dump({"query": user_input, "success": c, "tried": tried_candidates, "last_err": None}, f)
+            except Exception:
+                pass
+            log_error(f"resolve_symbol success (max) for {user_input} -> {c}")
+            return df, c
+
+    # log failure and save debug
+    log_error(f"resolve_symbol failed for {user_input}. Tried: {tried_candidates}. Last err: {last_err}")
+    try:
+        with open(RESOLVE_DEBUG, "w") as f:
+            json.dump({"query": user_input, "success": None, "tried": tried_candidates, "last_err": last_err}, f)
+    except Exception:
+        pass
     return None, None
 
 # ---- UNIVERSE LOADER ----
@@ -230,7 +293,7 @@ class BackgroundLearner:
         self.universe = load_universe()
         self.model = OnlineLinearModel(n_features=self.n_lags, lr=0.003)
         self.model.load(self.model_path)
-        self.ema_alpha = 0.02
+        self.ema_alpha = 0.02  # slow EMA for stability
         self.metrics = {
             "directional_accuracy_ema": 0.0,
             "mae_ema": np.nan,
@@ -274,6 +337,7 @@ class BackgroundLearner:
             return None
 
     def _build_features(self, df: pd.DataFrame):
+        """returns X (m,n_lags) and y (m,) where y is next-day return"""
         if df is None or len(df) <= self.n_lags + 1:
             return np.empty((0, self.n_lags)), np.empty((0,))
         closes = df['Close'].values
@@ -288,7 +352,6 @@ class BackgroundLearner:
         if preds.size == 0:
             return
         mae = np.mean(np.abs(preds - truths))
-        # allow numeric comparison even when zeros present
         dir_acc = float(np.mean(np.sign(preds) == np.sign(truths)))
         with self.lock:
             prev_da = self.metrics["directional_accuracy_ema"]
@@ -329,6 +392,7 @@ class BackgroundLearner:
                 time.sleep(self.interval_sec)
 
     def predict_for(self, ticker: str, n_lags=None) -> Tuple[float, float]:
+        """Return predicted next-day return (float) and confidence (0-100)"""
         n = n_lags or self.n_lags
         df = self._fetch_history(ticker, days=90)
         if df is None or len(df) <= n:
@@ -343,20 +407,34 @@ class BackgroundLearner:
         conf = max(0.0, min(100.0, (1.0 - vol * 8.0) * 100.0))
         return pred, conf
 
-    def scan_high_potential(self, min_pct: float=7.0, days:int=7, sample_limit:int=200, progress_cb=None) -> List[Dict]:
+    def scan_high_potential(self, min_pct: float=7.0, days:int=7, sample_limit: int = 200, progress_cb=None) -> List[Dict]:
+        """
+        Scan tickers from universe and return items with predicted_return >= min_pct (abs).
+        If sample_limit is None or <=0 -> scan the entire universe.
+        progress_cb: function(i, total) called during loop (for streamlit progress)
+        """
         results = []
         tickers = list(self.universe)
         if not tickers:
             return results
-        random.shuffle(tickers)
-        tickers = tickers[:sample_limit]
-        total = len(tickers)
-        for i, t in enumerate(tickers, start=1):
+        # Decide scan list
+        if sample_limit is None or sample_limit <= 0:
+            tickers_to_scan = tickers[:]  # entire universe
+        else:
+            # shuffle to sample varied set
+            tickers_shuf = tickers[:]
+            random.shuffle(tickers_shuf)
+            tickers_to_scan = tickers_shuf[:min(sample_limit, len(tickers_shuf))]
+
+        total = len(tickers_to_scan)
+        attempted = 0
+        for i, t in enumerate(tickers_to_scan, start=1):
             if progress_cb:
                 try:
                     progress_cb(i, total)
                 except Exception:
                     pass
+            attempted += 1
             try:
                 pred_ret, conf = self.predict_for(t)
                 est_pct = pred_ret * days * 100.0
@@ -377,6 +455,8 @@ class BackgroundLearner:
                 log_error(f"scan_high_potential error {t}: {e}")
                 continue
         results.sort(key=lambda x: abs(x['est_pct']), reverse=True)
+        for r in results:
+            r["_attempted_total"] = attempted
         return results
 
     def get_metrics(self):
@@ -438,6 +518,43 @@ def compute_targets(current_price:float, predicted_price:float, days:int) -> Tup
     rr = (reward/risk) if risk>0 else 0.0
     return entry, stop_loss, targets, rr
 
+# ---- FUNDAMENTALS ----
+def fetch_fundamentals(ticker: str) -> Dict:
+    """
+    Try multiple yfinance attributes to get fundamentals. Returns a dict (may be partially filled).
+    """
+    out = {}
+    try:
+        throttle_fetch()
+        tk = yf.Ticker(ticker)
+        try:
+            info = tk.info or {}
+        except Exception:
+            info = {}
+        fast = {}
+        try:
+            fast = getattr(tk, "fast_info", {}) or {}
+        except Exception:
+            fast = {}
+        out['trailingPE'] = info.get('trailingPE') if info.get('trailingPE') is not None else None
+        out['forwardPE'] = info.get('forwardPE') if info.get('forwardPE') is not None else None
+        out['priceToBook'] = info.get('priceToBook') if info.get('priceToBook') is not None else None
+        out['marketCap'] = info.get('marketCap') or fast.get('market_cap') or None
+        out['dividendYield'] = info.get('dividendYield') or info.get('dividendYield') or None
+        out['beta'] = info.get('beta') or fast.get('beta') or None
+        # Additional: last_close and avg volume
+        if not out.get('marketCap') or not out.get('dividendYield'):
+            try:
+                df = tk.history(period="6mo", interval="1d", auto_adjust=True)
+                if isinstance(df, pd.DataFrame) and not df.empty:
+                    out['last_close'] = float(df['Close'].iloc[-1])
+                    out['avg_volume_30d'] = int(df['Volume'].tail(30).mean()) if 'Volume' in df.columns else None
+            except Exception:
+                pass
+    except Exception as e:
+        log_error(f"fetch_fundamentals error for {ticker}: {e}")
+    return out
+
 # ---- PLOTTING ----
 def create_chart(df: pd.DataFrame, symbol:str) -> go.Figure:
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.06, row_heights=[0.55,0.2,0.25])
@@ -453,26 +570,12 @@ def create_chart(df: pd.DataFrame, symbol:str) -> go.Figure:
             fig.add_hline(y=70, line_dash='dash', line_color='red', row=3, col=1)
             fig.add_hline(y=30, line_dash='dash', line_color='green', row=3, col=1)
         except Exception:
-            # older plotly versions may not support row/col with add_hline - ignore if so
             pass
     if 'MACD' in df.columns:
         fig.add_trace(go.Scatter(x=df.index, y=df['MACD'], name='MACD'), row=3, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['MACD_Signal'], name='Signal'), row=3, col=1)
     fig.update_layout(title=f"{symbol} - Price & Indicators", height=820, xaxis_rangeslider_visible=False)
     return fig
-
-# ---- FUNDAMENTAL ANALYZER (basic from yfinance info) ----
-def extract_fundamentals(info:dict) -> Dict:
-    out = {}
-    if not info:
-        return out
-    out['trailingPE'] = info.get('trailingPE')
-    out['forwardPE'] = info.get('forwardPE')
-    out['priceToBook'] = info.get('priceToBook')
-    out['marketCap'] = info.get('marketCap')
-    out['dividendYield'] = info.get('dividendYield')
-    out['beta'] = info.get('beta')
-    return out
 
 # ---- APP UI ----
 st.set_page_config(page_title="JINNI - Indian Stock Market AI", page_icon="🧞", layout="wide")
@@ -496,22 +599,22 @@ with st.sidebar:
     input_symbol = st.text_input("Enter stock symbol (e.g., RELIANCE or RELIANCE.NS)", value="RELIANCE")
     horizon_days = st.selectbox("Prediction horizon (days)", options=[1,3,7,14,30,60,90,180,365,1825], index=2)
     st.markdown("**Recommendations**")
-    min_expected = st.number_input("Minimum expected move (%)", value=7.0, min_value=1.0, step=1.0)
+    st.write("Minimum expected move (%) — scanner will only report tickers whose |predicted move| over the horizon is at least this percentage.")
+    min_expected = st.number_input("Minimum expected move (%)", value=4.0, min_value=0.5, step=0.5, help="Lower this to find smaller moves; raise to filter for only large moves (fewer results).")
+    scan_all = st.checkbox("Scan entire universe (may be slow / rate-limited)", value=False,
+                           help="If checked, the scanner will try to evaluate all tickers in the universe. This can take a long time and might hit API limits.")
 
-    # Safe handling for max_scan number_input (ensure default <= max)
+    # ensure sensible max_scan value but ignored when scan_all is True
     try:
         universe_len = len(BG.universe) if BG and BG.universe is not None else 0
     except Exception:
         universe_len = 0
-    max_universe = universe_len if universe_len >= 50 else max(50, universe_len or 500)
     default_value = min(300, max(50, universe_len or 100))
-    if default_value > max_universe:
-        default_value = max_universe
-    max_scan = st.number_input("Max symbols to scan now",
-                               min_value=50,
-                               max_value=int(max_universe),
-                               value=int(default_value),
-                               step=25)
+    max_allowed = max(5000, universe_len or 500)
+    # ensure default <= max_allowed
+    if default_value > max_allowed:
+        default_value = max_allowed
+    max_scan = st.number_input("Max symbols to scan now (if not scanning entire universe)", min_value=10, max_value=int(max_allowed), value=int(default_value), step=25)
 
     st.write("---")
     st.subheader("Model (background)")
@@ -546,13 +649,14 @@ with col1:
             def progress_cb(i,total):
                 pct = min(100, int((i/total)*100)) if total else 100
                 progress.progress(pct)
-            results = BG.scan_high_potential(min_pct=min_expected, days=horizon_days, sample_limit=int(max_scan), progress_cb=progress_cb)
+            sample_limit = None if scan_all else int(max_scan)
+            results = BG.scan_high_potential(min_pct=min_expected, days=horizon_days, sample_limit=sample_limit, progress_cb=progress_cb)
             st.session_state.scan_results = results
             st.session_state.scan_status = "done"
             if not results:
                 st.info("No high-confidence opportunities found in this scan.")
             else:
-                st.success(f"Found {len(results)} candidate(s).")
+                st.success(f"Found {len(results)} candidate(s). Scanned: {results[0].get('_attempted_total', 'N/A')} tickers (approx).")
         except Exception as e:
             st.error("Scan failed — see logs.")
             log_error(f"scan_button_error: {e}")
@@ -560,24 +664,33 @@ with col1:
 
     if st.session_state.get("scan_results"):
         st.markdown("#### Scanner results (click to expand)")
-        for r in st.session_state["scan_results"][:20]:
+        for r in st.session_state["scan_results"][:50]:
             with st.expander(f"{r['symbol']} — Est: {r['est_pct']:+.2f}% | Conf: {r['confidence']:.1f}%"):
                 st.write(f"Last close: ₹{r['last_close']:.2f}")
                 if st.button(f"Analyze {r['symbol']}", key=f"an_{r['symbol']}"):
-                    # save analysis symbol in session state
                     st.session_state['analysis_symbol'] = r['symbol']
 
 with col2:
     st.markdown("### Stock analysis")
     symbol_to_analyze = st.session_state.get('analysis_symbol') or input_symbol
     st.write(f"Symbol (raw input): {symbol_to_analyze}")
+    # show resolve debug if exists
+    if os.path.exists(RESOLVE_DEBUG):
+        try:
+            with open(RESOLVE_DEBUG, "r") as f:
+                dbg = json.load(f)
+            with st.expander("Resolve debug (recent attempts)"):
+                st.write(dbg)
+        except Exception:
+            pass
+
     period_map = {
         1:"5d", 3:"5d", 7:"1mo", 14:"3mo", 30:"3mo", 60:"6mo", 90:"1y",180:"2y",365:"5y",1825:"10y"
     }
     period = period_map.get(horizon_days, "1y")
     hist, resolved = resolve_symbol(symbol_to_analyze, period=period)
     if hist is None:
-        st.error("Could not resolve the symbol or fetch market data. Try adding .NS or .BO suffix.")
+        st.error("Could not resolve the symbol or fetch market data. Try different suffixes (e.g., .NS, .BO) or check the Resolve debug above.")
     else:
         st.success(f"Resolved to: {resolved}")
         hist = calculate_indicators(hist)
@@ -590,26 +703,19 @@ with col2:
         c2.metric("Day High", f"₹{float(hist['High'].iloc[-1]):.2f}")
         c3.metric("Day Low", f"₹{float(hist['Low'].iloc[-1]):.2f}")
         c4.metric("Volume", f"{int(hist['Volume'].iloc[-1]):,}")
-        yf_info = {}
-        try:
-            throttle_fetch()
-            tk = yf.Ticker(resolved)
-            # some yfinance versions raise on .info; guard it
+        # robust fundamentals fetch
+        fundamentals = fetch_fundamentals(resolved)
+        if fundamentals and fundamentals.get('marketCap'):
             try:
-                yf_info = tk.info or {}
-            except Exception:
-                yf_info = {}
-        except Exception:
-            yf_info = {}
-        if yf_info and yf_info.get('marketCap'):
-            try:
-                c5.metric("Market Cap (Cr)", f"₹{yf_info.get('marketCap')/1e7:.2f}")
+                c5.metric("Market Cap (Cr)", f"₹{fundamentals.get('marketCap')/1e7:.2f}")
             except Exception:
                 c5.metric("Volatility", f"{hist['Volatility'].iloc[-1]:.2f}%")
         else:
             c5.metric("Volatility", f"{hist['Volatility'].iloc[-1]:.2f}%")
+        # chart
         st.plotly_chart(create_chart(hist, resolved), use_container_width=True)
 
+        # predictions
         with st.spinner("Generating predictions..."):
             est_daily_ret, conf = BG.predict_for(resolved)
             enhanced_price = enhanced_model_prediction(hist, days=horizon_days)
@@ -618,8 +724,8 @@ with col2:
             final_pred_price = pred_price_bg*bg_weight + enhanced_price*(1-bg_weight)
             pred_pct = (final_pred_price - last_close)/last_close*100.0 if last_close != 0 else 0.0
             entry, stop_loss, targets, rr = compute_targets(last_close, final_pred_price, horizon_days)
-            fundamentals = extract_fundamentals(yf_info)
 
+        # Recommendation block
         if pred_pct >= 15:
             rec = "🔵 STRONG BUY"
         elif pred_pct >= 5:
@@ -640,19 +746,76 @@ with col2:
             st.write(f"- Target {i}: ₹{t:.2f}  ({(t-entry)/entry*100:+.2f}%)")
         st.write(f"- Est. Risk-Reward (T2): 1:{rr:.2f}")
 
+        # Technical summary
         st.markdown("### Technical Summary")
-        st.write(f"- RSI (14): {hist['RSI'].iloc[-1]:.2f}")
-        st.write(f"- MACD: {hist['MACD'].iloc[-1]:.4f} (Signal: {hist['MACD_Signal'].iloc[-1]:.4f})")
-        st.write(f"- MA20: {hist['MA20'].iloc[-1]:.2f}  MA50: {hist['MA50'].iloc[-1]:.2f}  MA200: {hist['MA200'].iloc[-1]:.2f}")
-        st.write(f"- Volatility (ann): {hist['Volatility'].iloc[-1]:.2f}%")
+        try:
+            st.write(f"- RSI (14): {hist['RSI'].iloc[-1]:.2f}")
+            st.write(f"- MACD: {hist['MACD'].iloc[-1]:.4f} (Signal: {hist['MACD_Signal'].iloc[-1]:.4f})")
+            st.write(f"- MA20: {hist['MA20'].iloc[-1]:.2f}  MA50: {hist['MA50'].iloc[-1]:.2f}  MA200: {hist['MA200'].iloc[-1]:.2f}")
+            st.write(f"- Volatility (ann): {hist['Volatility'].iloc[-1]:.2f}%")
+        except Exception:
+            st.write("- Not enough data for full technical summary.")
 
-        st.markdown("### Fundamental Snapshot (from Yahoo if available)")
+        # Fundamentals display (show partials too)
+        st.markdown("### Fundamental Snapshot (from Yahoo / fallbacks)")
         if fundamentals:
             for k,v in fundamentals.items():
-                st.write(f"- {k}: {v}")
+                if v is None:
+                    st.write(f"- {k}: N/A")
+                else:
+                    if k == 'marketCap' and isinstance(v, (int, float)):
+                        st.write(f"- {k}: ₹{v/1e7:.2f} Cr")
+                    else:
+                        st.write(f"- {k}: {v}")
         else:
             st.info("No fundamental metrics found in Yahoo info for this ticker.")
 
+        # Combined conclusion
+        def make_conclusion(pred_pct, conf, hist, fundamentals):
+            notes = []
+            # technical signals
+            ma20 = hist['MA20'].iloc[-1] if 'MA20' in hist.columns else None
+            ma50 = hist['MA50'].iloc[-1] if 'MA50' in hist.columns else None
+            rsi = hist['RSI'].iloc[-1] if 'RSI' in hist.columns else None
+            if pred_pct >= 5 and conf > 40:
+                notes.append("Model shows a bullish expected move with reasonable confidence.")
+            elif pred_pct <= -5 and conf > 40:
+                notes.append("Model expects a bearish move with reasonable confidence.")
+            else:
+                notes.append("Model signals are weak or low-confidence — consider HOLD or reduced position size.")
+            if ma20 and ma50:
+                if ma20 > ma50:
+                    notes.append("Short-term trend (MA20 > MA50) is upward.")
+                else:
+                    notes.append("Short-term trend (MA20 <= MA50) is not convincingly upward.")
+            if rsi is not None:
+                if rsi > 70:
+                    notes.append(f"RSI={rsi:.0f} (overbought).")
+                elif rsi < 30:
+                    notes.append(f"RSI={rsi:.0f} (oversold).")
+                else:
+                    notes.append(f"RSI={rsi:.0f} (neutral).")
+            # fundamentals
+            if fundamentals:
+                mc = fundamentals.get('marketCap')
+                pe = fundamentals.get('trailingPE') or fundamentals.get('forwardPE')
+                if mc:
+                    notes.append(f"Market cap available — ₹{mc:,}.")
+                else:
+                    notes.append("Market cap not available from Yahoo (illiquid or missing).")
+                if pe:
+                    notes.append(f"PE (trailing/forward): {pe}.")
+                else:
+                    notes.append("PE not available.")
+            else:
+                notes.append("No fundamentals retrieved.")
+            return " | ".join(notes)
+
+        conclusion_text = make_conclusion(pred_pct, conf, hist, fundamentals)
+        st.markdown("### Combined Conclusion")
+        st.write(conclusion_text)
+
+        # Add symbol to universe for training if not present
         if resolved and resolved not in BG.universe:
             if st.button(f"Add {resolved} to training universe"):
                 try:
@@ -663,4 +826,4 @@ with col2:
                     log_error(f"add_symbol error: {e}")
 
 st.write("---")
-st.markdown("<small>Tip: populate universe then click 'Scan & Recommend'. Background learner will continue training automatically.</small>", unsafe_allow_html=True)
+st.markdown("<small>Tip: populate universe then click 'Scan & Recommend'. Scanning the entire universe may take a long time and may hit API rate limits.</small>", unsafe_allow_html=True)
