@@ -24,12 +24,12 @@ from bs4 import BeautifulSoup
 warnings.filterwarnings("ignore")
 
 # Import enhanced modules
-from online_learning.background_learner import EnhancedBackgroundLearner
+from online_learning.background_learner import BackgroundLearner
 from fundamental_analyzer import FundamentalAnalyzer
 from realtime_price import RealTimePriceTracker
 
 # Initialize core components
-BG_LEARNER = EnhancedBackgroundLearner()
+BG_LEARNER = BackgroundLearner()
 FUNDAMENTAL_ANALYZER = FundamentalAnalyzer()
 PRICE_TRACKER = RealTimePriceTracker()
 
