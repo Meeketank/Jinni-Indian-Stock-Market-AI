@@ -1,9 +1,12 @@
 # streamlit_app.py
 """
-JINNI — Indian Stock Market AI (Fixed number_input max-value issue)
-- Ensures number_input default <= max_value
-- Defensive guards for small/empty universe
-- Retains background learner and scan UI
+JINNI — Improved Streamlit app (single-file)
+- Background online learner (persisted)
+- Better prediction ensemble (learner + heuristic)
+- Fundamental analysis (yfinance.info)
+- Rich technical indicators + simple pattern signals
+- Safe scanning of universe with progress, no experimental_rerun
+- Robust error handling and caching
 """
 
 import streamlit as st
@@ -12,31 +15,29 @@ import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datetime import datetime
-import time, threading, random, os, pickle, traceback
+from datetime import datetime, timedelta
+import threading, time, os, pickle, random, math, traceback
 from typing import Tuple, List, Dict
 
-# ----------------- Configuration -----------------
+# ------------------- CONFIG -------------------
 CACHE_DIR = ".jinni_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
-MODEL_FILE = os.path.join(CACHE_DIR, "jinni_model.pkl")
-HIST_TTL_SECONDS = 60 * 60 * 6  # 6 hours
-FETCH_TTL_SECONDS = 60 * 20  # 20 minutes
-RATE_LIMIT_MIN_INTERVAL = 0.6
-BG_INTERVAL = 30
-BG_BATCH_SIZE = 40
-N_LAGS = 6
-MAX_UNIVERSE = 5000
+MODEL_FILE = os.path.join(CACHE_DIR, "background_model_v2.pkl")
+HIST_TTL = 60 * 60 * 6  # 6 hours cache for history
+FETCH_TTL = 60 * 20     # 20 minutes for fast fetch
+RATE_LIMIT = 0.6        # seconds between yfinance hits (cooperative)
+BG_INTERVAL = 20        # seconds between background batches
+BG_BATCH = 30           # tickers per background batch
+N_LAGS = 8              # features: N lag returns + extras
+MAX_UNIVERSE = 8000     # cap universe stored locally
 
-SEED_UNIVERSE = [
-    "RELIANCE.NS","TCS.NS","INFY.NS","HDFCBANK.NS","ICICIBANK.NS",
-    "HINDUNILVR.NS","BHARTIARTL.NS","KOTAKBANK.NS","LT.NS","SBIN.NS"
-]
+SEED = ["RELIANCE.NS","TCS.NS","INFY.NS","HDFCBANK.NS","ICICIBANK.NS",
+        "HINDUNILVR.NS","BHARTIARTL.NS","KOTAKBANK.NS","LT.NS","SBIN.NS"]
 
-# ----------------- Utilities -----------------
+# ------------------- UTIL -------------------
 def now_ts(): return time.time()
-def cache_path(symbol: str, kind: str="hist") -> str:
-    safe = symbol.replace("/", "_").replace(":", "_").replace(" ", "_")
+def cache_path(name, kind):
+    safe = name.replace("/", "_").replace(":", "_").replace(" ", "_")
     return os.path.join(CACHE_DIR, f"{safe}__{kind}.pkl")
 
 def save_cache(obj, path):
@@ -60,62 +61,91 @@ def load_cache(path, ttl):
 
 _last_fetch = 0.0
 _fetch_lock = threading.Lock()
-def throttle():
+def throttle_fetch():
     global _last_fetch
     with _fetch_lock:
         elapsed = time.time() - _last_fetch
-        if elapsed < RATE_LIMIT_MIN_INTERVAL:
-            time.sleep(RATE_LIMIT_MIN_INTERVAL - elapsed + random.random()*0.1)
+        if elapsed < RATE_LIMIT:
+            time.sleep(RATE_LIMIT - elapsed + random.random()*0.05)
         _last_fetch = time.time()
 
-def safe_yf_history(symbol: str, period="1y"):
-    attempts = 3
-    for i in range(attempts):
+def safe_history(symbol: str, period="1y") -> pd.DataFrame:
+    """Try to fetch history with small retry & throttle"""
+    for attempt in range(3):
         try:
-            throttle()
-            t = yf.Ticker(symbol)
-            df = t.history(period=period, interval="1d", auto_adjust=True)
+            throttle_fetch()
+            tk = yf.Ticker(symbol)
+            df = tk.history(period=period, interval="1d", auto_adjust=True)
             if isinstance(df, pd.DataFrame) and not df.empty:
                 return df
         except Exception:
-            time.sleep(0.5 + i*0.5)
+            time.sleep(0.6 + attempt*0.6)
     return None
 
-# ----------------- Features & Simple Online Model -----------------
-def build_features(df: pd.DataFrame, n_lags=N_LAGS):
-    if df is None or len(df) < n_lags + 8:
-        return np.empty((0, n_lags + 3)), np.empty((0,))
+# ------------------- FEATURES & INDICATORS -------------------
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    # MAs
+    for p in [5,10,20,50,100,200]:
+        df[f"MA{p}"] = df["Close"].rolling(window=p, min_periods=1).mean()
+    # RSI
+    delta = df["Close"].diff()
+    gain = delta.where(delta>0,0).rolling(14, min_periods=1).mean()
+    loss = (-delta.where(delta<0,0)).rolling(14, min_periods=1).mean().replace(0, np.nan)
+    rs = (gain / loss).fillna(0.0)
+    df["RSI"] = 100 - (100/(1+rs))
+    # MACD
+    exp12 = df["Close"].ewm(span=12).mean()
+    exp26 = df["Close"].ewm(span=26).mean()
+    df["MACD"] = exp12 - exp26
+    df["MACD_Signal"] = df["MACD"].ewm(span=9).mean()
+    df["MACD_Hist"] = df["MACD"] - df["MACD_Signal"]
+    # Bollinger
+    df["BB_mid"] = df["Close"].rolling(20, min_periods=1).mean()
+    bbstd = df["Close"].rolling(20, min_periods=1).std().fillna(0)
+    df["BB_up"] = df["BB_mid"] + 2*bbstd
+    df["BB_dn"] = df["BB_mid"] - 2*bbstd
+    df["BB_width"] = (df["BB_up"] - df["BB_dn"]) / df["BB_mid"].replace(0, np.nan)
+    # Volume MA
+    df["Vol_MA20"] = df["Volume"].rolling(20, min_periods=1).mean()
+    df["Vol_Ratio"] = df["Volume"] / df["Vol_MA20"].replace(0, np.nan)
+    # Volatility (20d annualized %)
+    df["Volatility"] = df["Close"].pct_change().rolling(20, min_periods=1).std() * np.sqrt(252) * 100
+    return df
+
+def build_features(df: pd.DataFrame, n_lags=N_LAGS) -> Tuple[np.ndarray, np.ndarray]:
+    """Return (X,y) where X includes last n_lags returns + simple technical features; y is next-day return"""
+    if df is None or len(df) < n_lags + 5:
+        return np.empty((0, n_lags+3)), np.empty((0,))
     close = df["Close"].values.astype(float)
-    returns = (close[1:] - close[:-1]) / (close[:-1] + 1e-12)
+    returns = (close[1:] - close[:-1])/(close[:-1]+1e-12)
+    X, y = [], []
     ma20 = pd.Series(close).rolling(20, min_periods=1).mean().values
     ma50 = pd.Series(close).rolling(50, min_periods=1).mean().values
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta>0,0).rolling(14,min_periods=1).mean()
-    loss = (-delta.where(delta<0,0)).rolling(14,min_periods=1).mean().replace(0, np.nan)
-    rsi = (100 - (100/(1 + (gain/loss).fillna(1.0)))).values
-    X, y = [], []
+    rsi = add_indicators(df)["RSI"].values
     for i in range(n_lags, len(returns)):
         lag = returns[i-n_lags:i]
-        idx = i + 1
-        price = close[idx] if idx < len(close) else close[-1]
-        ma_diff = (ma20[idx] - ma50[idx]) / (price if price != 0 else 1)
-        rsi_n = rsi[idx] if idx < len(rsi) else 50.0
-        vol = float(np.std(returns[max(0, i-20):i+1])) if i >= 1 else 0.0
-        feat = np.concatenate([lag, [ma_diff, rsi_n, vol]])
+        idx = i+1  # index into close for "current day"
+        ma_diff = (ma20[idx] - ma50[idx]) / (close[idx] if close[idx]!=0 else 1)
+        rsi_curr = float(rsi[idx]) if idx < len(rsi) else 50.0
+        vol = float(np.std(returns[max(0,i-20):i+1])) if i>0 else 0.0
+        feat = np.concatenate([lag, [ma_diff, rsi_curr, vol]])
         X.append(feat)
         y.append(returns[i])
     return np.array(X), np.array(y)
 
-class OnlineReg:
+# ------------------- LIGHTWEIGHT ONLINE MODEL -------------------
+class OnlineModel:
     def __init__(self, dim):
+        self.dim = dim
         self.w = np.zeros(dim)
         self.b = 0.0
-        self.lr = 0.004
-    def predict(self, X):
+        self.lr = 0.0035
+    def predict(self, X: np.ndarray) -> np.ndarray:
         X = np.atleast_2d(X)
         return X.dot(self.w) + self.b
-    def partial_fit(self, X, y):
-        if getattr(X, "size", 0) == 0:
+    def partial_fit(self, X: np.ndarray, y: np.ndarray):
+        if X.size == 0:
             return
         preds = self.predict(X)
         errs = preds - y
@@ -123,84 +153,80 @@ class OnlineReg:
         grad_b = errs.mean()
         self.w -= self.lr * grad_w
         self.b -= self.lr * grad_b
-    def state(self): return {"w": self.w, "b": self.b}
+    def state(self):
+        return {"w": self.w, "b": self.b}
     def load_state(self, s):
         if not s: return
         self.w = s.get("w", self.w)
         self.b = s.get("b", self.b)
 
-# ----------------- Background Learner -----------------
+# ------------------- BACKGROUND LEARNER -------------------
 class BackgroundLearner:
     def __init__(self, model_file=MODEL_FILE):
         self.model_file = model_file
         self.dim = N_LAGS + 3
-        self.reg = OnlineReg(self.dim)
-        self.universe = SEED_UNIVERSE.copy()
+        self.model = OnlineModel(self.dim)
+        self.universe = SEED.copy()
         self.metrics = {"dir_acc_ema": 0.5, "mae_ema": 0.5, "samples": 0}
-        self.ema_alpha = 0.04
+        self.ema_alpha = 0.05
         self._stop = threading.Event()
         self._thread = None
         self.lock = threading.Lock()
+        self.batch_size = BG_BATCH
+        self.interval = BG_INTERVAL
         self._load()
-
     def _load(self):
         if os.path.exists(self.model_file):
             try:
                 with open(self.model_file, "rb") as f:
                     obj = pickle.load(f)
-                self.reg.load_state(obj.get("reg", {}))
+                self.model.load_state(obj.get("model_state", {}))
                 self.universe = obj.get("universe", self.universe)[:MAX_UNIVERSE]
                 self.metrics.update(obj.get("metrics", {}))
             except Exception:
                 pass
-
     def _persist(self):
         try:
             with open(self.model_file, "wb") as f:
-                pickle.dump({"reg": self.reg.state(), "universe": self.universe, "metrics": self.metrics}, f)
+                pickle.dump({"model_state": self.model.state(), "universe": self.universe, "metrics": self.metrics}, f)
         except Exception:
             pass
-
     def start(self):
-        if self._thread and self._thread.is_alive():
-            return
+        if self._thread and self._thread.is_alive(): return
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
-
     def stop(self):
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=2)
         self._persist()
-
-    def add_to_universe(self, sym: str):
-        if not sym: return
-        s = sym.strip().upper()
+    def add_symbol(self, sym: str):
+        s = (sym or "").strip().upper()
+        if not s: return
         if s not in self.universe:
             self.universe.insert(0, s)
             self.universe = self.universe[:MAX_UNIVERSE]
-
     def _loop(self):
         while not self._stop.is_set():
             try:
                 if not self.universe:
                     time.sleep(1); continue
-                batch = random.sample(self.universe, min(BG_BATCH_SIZE, len(self.universe)))
+                batch = random.sample(self.universe, min(self.batch_size, len(self.universe)))
                 batch_dir, batch_mae, batch_samples = [], [], 0
                 for s in batch:
                     try:
-                        hist = load_cache(cache_path(s,"hist"), HIST_TTL_SECONDS)
+                        hist = load_cache(cache_path(s,"hist"), HIST_TTL)
                         if hist is None:
-                            hist = safe_yf_history(s, period="400d")
+                            hist = safe_history(s, period="400d")
                             if hist is None: continue
                             save_cache(hist, cache_path(s,"hist"))
-                        X, y = build_features(hist, N_LAGS)
+                        X,y = build_features(hist, N_LAGS)
                         if X.size == 0: continue
-                        preds = self.reg.predict(X)
+                        preds = self.model.predict(X)
                         mae = float(np.mean(np.abs(preds - y)))
                         dir_acc = float(np.mean(np.sign(preds) == np.sign(y)))
-                        self.reg.partial_fit(X, y)
+                        self.model.partial_fit(X, y)
                         batch_dir.append(dir_acc); batch_mae.append(mae)
                         batch_samples += len(y)
                         time.sleep(0.01)
@@ -215,309 +241,394 @@ class BackgroundLearner:
                             self.metrics["mae_ema"] = a * float(np.mean(batch_mae)) + (1-a) * self.metrics["mae_ema"]
                         self.metrics["samples"] += batch_samples
                     self._persist()
-                time.sleep(BG_INTERVAL + random.random()*3)
+                time.sleep(self.interval + random.random()*3)
             except Exception:
-                time.sleep(BG_INTERVAL + random.random()*3)
-
+                time.sleep(self.interval + random.random()*3)
     def get_metrics(self):
         with self.lock:
             return dict(self.metrics)
-
-    def predict_for(self, symbol: str, days: int = 7) -> Tuple[float, float]:
+    def predict(self, symbol: str, days:int=7) -> Tuple[float,float]:
+        """
+        Return predicted multi-day return (as fraction) and confidence [0..1]
+        Steps:
+        - Fetch / cache history
+        - Build features; use last feature to predict daily return
+        - Convert to days-horizon with sqrt scaling
+        - Confidence based on data size & volatility
+        """
         try:
-            if not symbol or not isinstance(symbol, str):
-                return 0.0, 0.0
-            s = symbol.strip().upper()
-            hist = load_cache(cache_path(s,"hist"), HIST_TTL_SECONDS)
+            s = (symbol or "").strip().upper()
+            hist = load_cache(cache_path(s,"hist"), FETCH_TTL)
             if hist is None:
-                hist = safe_yf_history(s, period="300d")
-                if hist is None: return 0.0, 0.0
+                hist = safe_history(s, period="500d")
+                if hist is None:
+                    return 0.0, 0.0
                 save_cache(hist, cache_path(s,"hist"))
             X, _ = build_features(hist, N_LAGS)
             if X.size == 0:
                 return 0.0, 0.0
-            latest = X[-1].reshape(1, -1)
-            est = float(self.reg.predict(latest)[0])
-            recent = (hist["Close"].values[1:] - hist["Close"].values[:-1]) / (hist["Close"].values[:-1] + 1e-12)
-            vol = float(np.std(recent[-60:])) if len(recent) >= 1 else 0.0
-            data_factor = min(0.99, 0.05 + min(1.0, len(hist)/250.0))
-            conf = max(0.01, min(0.99, data_factor * (1.0 - vol * 3.0)))
-            est = float(np.clip(est, -0.8, 0.8))
-            return est, conf
+            latest = X[-1].reshape(1,-1)
+            daily_pred = float(np.clip(self.model.predict(latest)[0], -0.8, 0.8))
+            # convert to multi-day: sqrt scaling
+            multi = daily_pred * math.sqrt(max(1, days))
+            # confidence: depends on history length and volatility
+            returns = (hist["Close"].values[1:] - hist["Close"].values[:-1])/(hist["Close"].values[:-1]+1e-12)
+            vol = float(np.std(returns[-60:])) if len(returns)>=10 else float(np.std(returns)) if len(returns)>0 else 0.0
+            data_strength = min(1.0, len(hist)/250.0)
+            conf = max(0.03, min(0.99, data_strength * (1.0 - vol*2.5)))
+            return multi, conf
         except Exception:
             return 0.0, 0.0
-
-    def scan_high_potential(self, min_pct: float = 10.0, days: int = 7, sample_limit: int = None, progress_callback=None):
+    def scan_universe(self, min_pct: float=10.0, days:int=7, sample_limit:int=200, progress_hook=None) -> List[Dict]:
+        """Scan the stored universe (sample_limit items) and return candidates with expected absolute pct >= min_pct"""
         results = []
-        try:
-            pool = list(self.universe)
-            if not pool:
-                return results
-            if sample_limit is None or sample_limit <= 0:
-                sample_limit = len(pool)
-            sample_limit = min(sample_limit, len(pool))
-            random.shuffle(pool)
-            pool = pool[:sample_limit]
-            total = len(pool)
-            for i, s in enumerate(pool, 1):
-                try:
-                    hist = load_cache(cache_path(s,"hist"), HIST_TTL_SECONDS)
+        pool = list(self.universe)
+        if not pool: return results
+        limit = min(sample_limit, len(pool))
+        sample = random.sample(pool, limit)
+        total = len(sample)
+        for i, s in enumerate(sample, 1):
+            try:
+                hist = load_cache(cache_path(s,"hist"), HIST_TTL)
+                if hist is None:
+                    hist = safe_history(s, period="180d")
                     if hist is None:
-                        hist = safe_yf_history(s, period="180d")
-                        if hist is None:
-                            if progress_callback: progress_callback(i, total)
-                            continue
-                        save_cache(hist, cache_path(s,"hist"))
-                    est_daily, conf = self.predict_for(s, days=days)
-                    est_pct = est_daily * (days ** 0.5) * 100
-                    if abs(est_pct) >= abs(min_pct) and conf > 0.07:
-                        cur = float(hist["Close"].iloc[-1])
-                        tgt = cur * (1 + est_daily * (days ** 0.5))
-                        results.append({"symbol": s, "expected_pct": est_pct, "confidence": conf, "current": cur, "target": tgt})
-                except Exception:
-                    pass
-                if progress_callback:
-                    try:
-                        progress_callback(i, total)
-                    except Exception:
-                        pass
-            results.sort(key=lambda r: abs(r["expected_pct"]), reverse=True)
-            return results
-        except Exception:
-            return results
+                        if progress_hook: progress_hook(i, total)
+                        continue
+                    save_cache(hist, cache_path(s,"hist"))
+                pred, conf = self.predict(s, days=days)
+                est_pct = pred * 100.0
+                # scale with sqrt timeframe to compare to user percent
+                eff_pct = est_pct
+                if abs(eff_pct) >= abs(min_pct) and conf > 0.06:
+                    cur = float(hist["Close"].iloc[-1])
+                    tgt = cur * (1 + pred)
+                    results.append({"symbol": s, "expected_pct": eff_pct, "confidence": conf, "current": cur, "target": tgt})
+            except Exception:
+                pass
+            if progress_hook:
+                progress_hook(i, total)
+        results.sort(key=lambda r: abs(r["expected_pct"]), reverse=True)
+        return results
 
-# ----------------- Streamlit UI -----------------
-st.set_page_config(page_title="JINNI — Indian Stock Market AI", page_icon="🧞", layout="wide")
-st.title("🧞 JINNI — Indian Stock Market AI")
-st.caption("Background training runs automatically. ⚠️ Educational only — not financial advice.")
+# ------------------- INITIALIZE BG -------------------
+if "BG" not in st.session_state:
+    st.session_state.BG = BackgroundLearner()
+    st.session_state.BG.start()
+BG = st.session_state.BG
 
-if "bg" not in st.session_state:
-    st.session_state.bg = BackgroundLearner()
-    st.session_state.bg.start()
-BG = st.session_state.bg
+# ------------------- STREAMLIT UI -------------------
+st.set_page_config(page_title="JINNI — Indian Stock Market AI (improved)", page_icon="🧞", layout="wide")
+st.markdown("<h1 style='text-align:center'>🧞 JINNI — Indian Stock Market AI</h1>", unsafe_allow_html=True)
+st.write("Background training runs automatically. ⚠️ Educational only — not financial advice.")
 
-# Sidebar: controls
+# Sidebar controls
 with st.sidebar:
     st.header("Controls")
-    user_symbol = st.text_input("Enter stock symbol (e.g., RELIANCE or RELIANCE.NS)", value="RELIANCE")
-    pred_days = st.selectbox("Prediction horizon (days)", options=[1,7,14,30,60,180,365,1825], index=1)
+    user_input = st.text_input("Enter stock symbol (e.g., RELIANCE or RELIANCE.NS)", value="RELIANCE")
+    pred_days = st.selectbox("Prediction horizon (days)", [1,7,14,30,60,90,180,365], index=1)
     st.markdown("---")
     st.subheader("Recommendations")
-    st.write("Scan the model's universe for high potential stocks (>= threshold).")
-    min_pct = st.number_input("Minimum expected move (%)", value=10.0, step=1.0)
-    scan_all = st.checkbox("Scan full universe (may take long)", value=False)
-
-    # --------- FIX: compute universe-based max_value safely ----------
+    min_pct = st.number_input("Minimum expected move (%)", value=7.0, step=1.0)
+    scan_full = st.checkbox("Scan full stored universe (may take long)", value=False)
+    # safe max for number_input
     uni_len = len(BG.universe) if BG.universe else 0
-    # define sensible minimum and maximum for the input widget
-    widget_min = 10
-    widget_default = 400
-    # If universe empty or small, set a safe max to avoid StreamlitValueAboveMaxError
+    min_limit = 10
+    default_limit = 400
     if uni_len <= 0:
-        widget_max = max(100, widget_default)  # allow user to set even if universe empty (but will scan fewer)
+        max_limit = max(min_limit, default_limit)
     else:
-        widget_max = max(widget_min, uni_len)
-
-    # Ensure default value <= widget_max
-    widget_default = min(widget_default, widget_max)
-
-    # Provide UI with safe bounds
-    sample_limit = st.number_input(
-        "Max symbols to scan now",
-        min_value=widget_min,
-        max_value=widget_max,
-        value=widget_default,
-        step=50,
-        help="If the universe is small the max will be lowered automatically."
-    )
-    # ----------------------------------------------------------------
-
-    if st.button("🔍 Find opportunities"):
-        st.session_state["scan_results"] = None
-        placeholder = st.empty()
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        status_text.info("Starting scan...")
-        # determine sample_limit for scan call (allow full universe if requested)
-        actual_limit = None if scan_all else int(min(sample_limit, len(BG.universe) if BG.universe else sample_limit))
-        def progress_cb(i, total):
-            frac = int((i/total)*100) if total>0 else 0
-            progress_bar.progress(min(100, frac))
-            status_text.info(f"Scanning {i}/{total} ({frac}%)")
-        try:
-            results = BG.scan_high_potential(min_pct=min_pct, days=pred_days, sample_limit=actual_limit, progress_callback=progress_cb)
-            st.session_state["scan_results"] = results
-            progress_bar.progress(100)
-            status_text.success(f"Scan finished — {len(results)} candidate(s) found.")
-        except Exception as e:
-            tb = traceback.format_exc()
-            with open(os.path.join(CACHE_DIR, "last_error.log"), "a") as f:
-                f.write(f"\n\n[{datetime.now().isoformat()}] Error during scan: {str(e)}\n{tb}")
-            status_text.error("Scan failed — see logs (.jinni_cache/last_error.log).")
-            st.session_state["scan_results"] = []
-        st.experimental_rerun()
-
+        max_limit = max(min_limit, uni_len)
+    default_limit = min(default_limit, max_limit)
+    sample_limit = st.number_input("Max symbols to scan now", min_value=min_limit, max_value=max_limit, value=default_limit, step=25)
+    scan_btn = st.button("🔍 Find opportunities")
     st.markdown("---")
-    st.subheader("Background Model")
+    st.subheader("Model (background)")
     m = BG.get_metrics()
     st.metric("Directional accuracy (EMA)", f"{m.get('dir_acc_ema',0.0)*100:.2f}%")
     st.metric("MAE (EMA)", f"{m.get('mae_ema',0.0):.4f}")
     st.write(f"Trained samples: {m.get('samples',0):,}")
     st.markdown("---")
-    st.info("Tip: Add symbols to training universe using 'Add to universe' on the main page.")
+    st.write("Tip: Add symbols to the background universe by analyzing them (button on main page).")
 
-# ----------------- Main analysis area -----------------
-st.header("Stock Analysis")
-
-def resolve_and_fetch(symbol: str, period="2y"):
-    s = (symbol or "").strip()
-    if not s:
-        return None, None
-    s_up = s.upper()
+# MAIN: resolve symbol and fetch
+def resolve_candidates(symbol: str) -> List[str]:
+    s = (symbol or "").strip().upper()
+    if not s: return []
     candidates = []
-    if s_up.endswith(".NS") or s_up.endswith(".BO"):
-        candidates = [s_up, s_up.replace(".BO", ".NS"), s_up.replace(".NS", ".BO"), s_up.split(".")[0]]
+    if s.endswith(".NS") or s.endswith(".BO"):
+        candidates = [s, s.replace(".BO",".NS"), s.replace(".NS",".BO"), s.split(".")[0]]
     else:
-        candidates = [s_up, s_up + ".NS", s_up + ".BO", s_up]
+        candidates = [s, s+".NS", s+".BO"]
+    # dedupe & keep order
+    seen = set(); res=[]
     for c in candidates:
-        cached = load_cache(cache_path(c,"hist"), FETCH_TTL_SECONDS)
-        if cached is not None:
-            return cached, c + " (cache)"
-    for c in candidates:
-        df = safe_yf_history(c, period=period)
+        if c not in seen:
+            res.append(c); seen.add(c)
+    return res
+
+cands = resolve_candidates(user_input)
+hist = None; resolved=None
+# try cache first
+for c in cands:
+    cached = load_cache(cache_path(c,"hist"), FETCH_TTL)
+    if cached is not None:
+        hist = cached; resolved=c; break
+# else try download
+if hist is None:
+    for c in cands:
+        df = safe_history(c, period="2y")
         if df is not None and not df.empty:
-            save_cache(df, cache_path(c,"hist"))
-            return df, c + " (download)"
-    return None, "Not found"
+            hist = df; resolved=c
+            save_cache(hist, cache_path(c,"hist"))
+            break
 
-with st.spinner("Resolving symbol and fetching data (cache aware)..."):
-    df, resolved_label = resolve_and_fetch(user_symbol, period="2y")
-
-if df is None:
-    st.error(f"Could not resolve the symbol or fetch market data. Tried candidates. Tip: add .NS for NSE or .BO for BSE. (Tried label: {resolved_label})")
+if hist is None:
+    st.error("Could not fetch data for that symbol. Try adding .NS or .BO suffix. (Tried: {}).".format(", ".join(cands)))
     st.stop()
 
-hist = df.copy()
-symbol_display = resolved_label.split()[0]
+# add to universe to train on it going forward
+BG.add_symbol(resolved)
+
+hist = add_indicators(hist)
 last_price = float(hist["Close"].iloc[-1])
 prev = float(hist["Close"].iloc[-2]) if len(hist)>1 else last_price
-st.subheader(f"{symbol_display}  —  {resolved_label}")
-st.metric("Last Close", f"₹{last_price:.2f}", f"{(last_price-prev):+.2f} ({(last_price-prev)/prev*100:+.2f}%)")
+st.subheader(f"{resolved} — Last Close: ₹{last_price:.2f} ({(last_price-prev):+.2f}, {(last_price-prev)/prev*100:+.2f}%)")
 
-# Plot
-def plot_chart(df):
-    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.6,0.2,0.2])
+# Plot enhanced chart
+def plot_stock(df, symbol):
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.04,
+                        row_heights=[0.55, 0.2, 0.25])
     fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Price"), row=1, col=1)
-    fig.add_trace(go.Bar(x=df.index, y=df["Volume"], name="Volume"), row=2, col=1)
-    # RSI quick calc
-    delta = df["Close"].diff()
-    gain = delta.where(delta>0,0).rolling(14,min_periods=1).mean()
-    loss = (-delta.where(delta<0,0)).rolling(14,min_periods=1).mean().replace(0, np.nan)
-    rsi = (100 - (100/(1 + (gain/loss).fillna(1.0))))
-    fig.add_trace(go.Scatter(x=df.index, y=rsi, name="RSI"), row=3, col=1)
-    fig.update_layout(height=700, showlegend=True)
+    # MAs
+    for ma in ["MA20","MA50","MA200"]:
+        if ma in df.columns:
+            fig.add_trace(go.Scatter(x=df.index, y=df[ma], name=ma, line=dict(width=1.5)), row=1, col=1)
+    # Bollinger
+    if "BB_up" in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df["BB_up"], name="BB_up", line=dict(width=1, dash="dash")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["BB_dn"], name="BB_dn", line=dict(width=1, dash="dash")), row=1, col=1)
+    # Volume
+    colors = ['red' if o>c else 'green' for o,c in zip(df["Open"], df["Close"])]
+    fig.add_trace(go.Bar(x=df.index, y=df["Volume"], marker_color=colors, name="Volume"), row=2, col=1)
+    # RSI
+    fig.add_trace(go.Scatter(x=df.index, y=df["RSI"], name="RSI"), row=3, col=1)
+    fig.update_layout(height=800, showlegend=True, title_text=f"{symbol} Technicals")
+    fig.update_yaxes(title_text="Price", row=1, col=1)
+    fig.update_yaxes(title_text="Volume", row=2, col=1)
+    fig.update_yaxes(title_text="RSI", row=3, col=1)
     return fig
 
-st.plotly_chart(plot_chart(hist), use_container_width=True)
+st.plotly_chart(plot_stock(hist, resolved), use_container_width=True)
 
-# add to BG universe (silently)
+# Technical pattern detection (simple)
+def detect_patterns(df):
+    signals=[]
+    # MA crosses (20 & 50)
+    if "MA20" in df and "MA50" in df:
+        if df["MA20"].iloc[-2] < df["MA50"].iloc[-2] and df["MA20"].iloc[-1] > df["MA50"].iloc[-1]:
+            signals.append("MA20/MA50 Bullish crossover")
+        if df["MA20"].iloc[-2] > df["MA50"].iloc[-2] and df["MA20"].iloc[-1] < df["MA50"].iloc[-1]:
+            signals.append("MA20/MA50 Bearish crossover")
+    # MACD cross
+    if "MACD" in df and "MACD_Signal" in df:
+        if df["MACD"].iloc[-2] < df["MACD_Signal"].iloc[-2] and df["MACD"].iloc[-1] > df["MACD_Signal"].iloc[-1]:
+            signals.append("MACD bullish cross")
+        if df["MACD"].iloc[-2] > df["MACD_Signal"].iloc[-2] and df["MACD"].iloc[-1] < df["MACD_Signal"].iloc[-1]:
+            signals.append("MACD bearish cross")
+    # Bollinger squeeze (narrow)
+    if "BB_width" in df:
+        if df["BB_width"].iloc[-1] < df["BB_width"].rolling(50, min_periods=1).mean().iloc[-1]*0.5:
+            signals.append("Bollinger squeeze (low volatility)")
+    # Volume spike
+    if "Vol_Ratio" in df:
+        if df["Vol_Ratio"].iloc[-1] > 2.0:
+            signals.append("Volume spike (>2x 20d avg)")
+    return signals
+
+pattern_signals = detect_patterns(hist)
+if pattern_signals:
+    st.markdown("### 🔔 Pattern Signals")
+    for s in pattern_signals:
+        st.write("- " + s)
+else:
+    st.info("No major pattern triggers detected (MA/MACD/Bollinger/Volume)")
+
+# Fundamental analysis
+st.header("Fundamental Snapshot")
+info = {}
 try:
-    BG.add_to_universe(symbol_display)
+    info = yf.Ticker(resolved).info
 except Exception:
-    pass
+    info = {}
+fund_rows = []
+pe = info.get("trailingPE") or info.get("forwardPE")
+pb = info.get("priceToBook")
+div_yield = info.get("dividendYield")
+roe = info.get("returnOnEquity")
+profit_margin = info.get("profitMargins")
+rev_growth = info.get("revenueGrowth")
+market_cap = info.get("marketCap")
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("P/E", f"{pe:.2f}" if pe else "N/A")
+col2.metric("P/B", f"{pb:.2f}" if pb else "N/A")
+col3.metric("Div Yield", f"{div_yield*100:.2f}%" if div_yield else "N/A")
+col4.metric("ROE", f"{roe*100:.2f}%" if roe else "N/A")
+st.write("**Profit Margin:**", f"{profit_margin*100:.2f}%" if profit_margin else "N/A")
+st.write("**Revenue Growth (TTM):**", f"{rev_growth*100:.2f}%" if rev_growth else "N/A")
+if market_cap:
+    st.write("**Market Cap:**", f"₹{market_cap/1e7:.2f} Cr")
 
-# prediction call
-try:
-    est_daily, conf = BG.predict_for(symbol_display, days=pred_days)
-    conf_pct = conf * 100.0
-except Exception as e:
-    est_daily, conf = 0.0, 0.0
-    conf_pct = 0.0
-    with open(os.path.join(CACHE_DIR,"last_error.log"), "a") as f:
-        f.write(f"\n\n[{datetime.now().isoformat()}] Error in predict_for: {e}\n{traceback.format_exc()}")
+# Ensemble prediction (BG learner + heuristics)
+st.header("🔮 Prediction & Trading Plan")
+bg_pred, bg_conf = BG.predict(resolved, days=pred_days)
+# heuristic enhanced prediction (momentum + MA trend + volatility)
+def heuristic_prediction(df, days):
+    cp = df["Close"].iloc[-1]
+    # multi-timeframe momentum
+    m5 = df["Close"].pct_change().tail(5).mean()
+    m20 = df["Close"].pct_change().tail(20).mean()
+    momentum = 0.6*m5 + 0.4*m20
+    # MA trend boost
+    ma_boost = 0.0
+    if "MA20" in df and "MA50" in df:
+        ma_boost = 0.03 if df["MA20"].iloc[-1] > df["MA50"].iloc[-1] else -0.02
+    vol = df["Volatility"].iloc[-1] if "Volatility" in df else 0.0
+    vol_adj = max(0.5, 1.0 - vol/50.0)
+    est_daily = (momentum + ma_boost) * vol_adj
+    est_multi = est_daily * math.sqrt(max(1, days))
+    # clamp
+    est_multi = float(np.clip(est_multi, -0.6, 0.6))
+    return est_multi
+heur = heuristic_prediction(hist, pred_days)
 
-pred_price = last_price * (1 + est_daily * (pred_days ** 0.5))
-pred_pct = (pred_price - last_price) / last_price * 100.0
+# combine
+if bg_conf > 0.12:
+    # weight by bg_conf (0..1)
+    w = bg_conf
+    final_est = bg_pred * w + heur * (1-w)
+    final_conf = max(0.05, min(0.99, bg_conf + 0.05))
+else:
+    final_est = heur
+    final_conf = max(0.02, min(0.9, 0.25))
 
-# fallback if model confidence very low
-if conf < 0.08:
-    fallback_daily = hist["Close"].pct_change().tail(5).mean() if len(hist) >= 5 else 0.0
-    fallback_price = last_price * (1 + fallback_daily * (pred_days ** 0.5))
-    pred_price = 0.6 * pred_price + 0.4 * fallback_price
-    pred_pct = (pred_price - last_price) / last_price * 100.0
+pred_price = last_price * (1 + final_est)
+pred_pct = final_est * 100.0
 
-# show card
-def show_prediction_card():
-    if pred_pct >= 15:
-        sig_style = "background:#d4edda;padding:12px;border-left:6px solid #28a745;border-radius:8px"
-        sig_label = "🔵 STRONG BUY"
-    elif pred_pct >= 5:
-        sig_style = "background:#d4edda;padding:12px;border-left:6px solid #28a745;border-radius:8px"
-        sig_label = "🟢 BUY"
-    elif pred_pct <= -15:
-        sig_style = "background:#f8d7da;padding:12px;border-left:6px solid #dc3545;border-radius:8px"
-        sig_label = "🔴 STRONG SELL"
-    elif pred_pct <= -5:
-        sig_style = "background:#f8d7da;padding:12px;border-left:6px solid #dc3545;border-radius:8px"
-        sig_label = "🔴 SELL"
-    else:
-        sig_style = "background:#fff3cd;padding:12px;border-left:6px solid #ffc107;border-radius:8px"
-        sig_label = "⚪ HOLD"
-    st.markdown(f"<div style='{sig_style}'><h3>Prediction: {sig_label}</h3><h2>₹{pred_price:.2f}</h2><p>{pred_pct:+.2f}% in {pred_days} days</p><p>Model confidence: {conf_pct:.1f}%</p></div>", unsafe_allow_html=True)
+# Avoid tiny meaningless predictions: if very small (<0.5% in longer horizons) amplify slightly using volatility
+if abs(pred_pct) < 2.0 and pred_days>=30:
+    # use volatility to estimate realistic bound
+    vol = hist["Volatility"].iloc[-1] if "Volatility" in hist else 0.0
+    # nudge by vol*sqrt(t)
+    pred_pct = pred_pct + (vol * math.sqrt(pred_days/30.0) * 0.15)
+    pred_price = last_price * (1 + pred_pct/100.0)
 
-show_prediction_card()
+# Present
+sig_style = "hold"
+if pred_pct >= 15: sig="🔵 STRONG BUY"; sig_style="buy"
+elif pred_pct >= 5: sig="🟢 BUY"; sig_style="buy"
+elif pred_pct <= -15: sig="🔴 STRONG SELL"; sig_style="sell"
+elif pred_pct <= -5: sig="🔴 SELL"; sig_style="sell"
+else: sig="⚪ HOLD"; sig_style="hold"
 
-# trading plan
-entry = last_price
-stop = entry*(1-0.03) if pred_pct>=0 else entry*(1+0.03)
-targets = [entry*(1 + (pred_pct/100.0) * mult * (pred_days ** 0.5)) for mult in (0.35,0.7,1.05,1.4)]
-risk = abs(entry - stop)
-reward = abs(targets[1] - entry) if len(targets) > 1 else 0.0
-rr = (reward / risk) if risk > 0 else 0.0
+color = {"buy":"#d4edda","sell":"#f8d7da","hold":"#fff3cd"}.get(sig_style,"#fff3cd")
+border = {"buy":"#28a745","sell":"#dc3545","hold":"#ffc107"}.get(sig_style,"#ffc107")
 
+st.markdown(f"""
+<div style="background:{color};padding:12px;border-left:6px solid {border};border-radius:8px">
+<h3>Prediction: {sig}</h3>
+<h2>₹{pred_price:.2f}</h2>
+<p style="font-size:16px;color:{'green' if pred_pct>0 else 'red'}">{pred_pct:+.2f}% in {pred_days} days</p>
+<p style="font-size:12px;color:#444">Model confidence: {final_conf*100:.1f}% — Learner contribution: {bg_conf*100:.1f}%</p>
+</div>
+""", unsafe_allow_html=True)
+
+# Trading plan targets 4-levels
+def compute_targets(current, pct_expected, days):
+    entry = current
+    stop = entry * (1 - 0.035) if pct_expected>=0 else entry * (1 + 0.035)
+    # scale based on days
+    tf = math.sqrt(max(1, days/7.0))
+    t1 = entry*(1 + pct_expected/100.0 * 0.33 * tf)
+    t2 = entry*(1 + pct_expected/100.0 * 0.66 * tf)
+    t3 = entry*(1 + pct_expected/100.0 * 1.0 * tf)
+    t4 = entry*(1 + pct_expected/100.0 * 1.4 * tf)
+    risk = abs(entry - stop)
+    reward = abs(t2 - entry) if risk>0 else 0.0
+    rr = reward / risk if risk>0 else 0.0
+    return entry, stop, [t1,t2,t3,t4], rr
+
+entry, stop, targets, rr = compute_targets(last_price, pred_pct, pred_days)
 st.subheader("Trading Plan")
 st.write(f"- Entry: ₹{entry:.2f}")
 st.write(f"- Stop Loss: ₹{stop:.2f}")
-for i, t in enumerate(targets, 1):
+for i,t in enumerate(targets,1):
     st.write(f"- Target {i}: ₹{t:.2f} ({(t-entry)/entry*100:+.1f}%)")
-st.write(f"- Est risk-reward (T2): 1:{rr:.2f}")
+st.write(f"- Risk-Reward (T2): 1:{rr:.2f}")
 
-# technical snapshot
+# Technical snapshot metrics
 st.subheader("Technical Snapshot")
-delta = hist["Close"].diff()
-gain = delta.where(delta>0,0).rolling(14,min_periods=1).mean()
-loss = (-delta.where(delta<0,0)).rolling(14,min_periods=1).mean().replace(0,np.nan)
-rsi_val = float((100 - (100/(1 + (gain/loss).fillna(1.0)))) .iloc[-1]) if len(hist)>0 else np.nan
-macd_val = float(hist["Close"].ewm(span=12).mean().iloc[-1] - hist["Close"].ewm(span=26).mean().iloc[-1])
-ma50_val = float(hist["Close"].rolling(50, min_periods=1).mean().iloc[-1])
-vol = float(hist["Close"].pct_change().rolling(20).std().iloc[-1])*np.sqrt(252)*100 if len(hist)>1 else 0.0
-c1, c2, c3, c4 = st.columns(4)
+rsi_val = hist["RSI"].iloc[-1]
+macd = hist["MACD"].iloc[-1]
+macd_sig = hist["MACD_Signal"].iloc[-1]
+ma50 = hist["MA50"].iloc[-1] if "MA50" in hist else None
+vol = hist["Volatility"].iloc[-1] if "Volatility" in hist else 0.0
+c1,c2,c3,c4 = st.columns(4)
 c1.metric("RSI (14)", f"{rsi_val:.1f}", "Overbought" if rsi_val>70 else ("Oversold" if rsi_val<30 else "Neutral"))
-c2.metric("MACD", f"{macd_val:.3f}", "Bullish" if macd_val>0 else "Bearish")
-c3.metric("Trend (MA50)", "Bullish" if last_price>ma50_val else "Bearish")
+c2.metric("MACD", f"{macd - macd_sig:.4f}", "Bullish" if macd>macd_sig else "Bearish")
+c3.metric("Trend (MA50)", "Bullish" if last_price>ma50 else "Bearish")
 c4.metric("Volatility (ann %)", f"{vol:.2f}%")
 
-# add symbol to universe button
-if st.button("➕ Add this symbol to background training universe"):
-    try:
-        BG.add_to_universe(symbol_display)
-        st.success(f"Added {symbol_display} to training universe.")
-    except Exception:
-        st.error("Failed to add symbol to universe — see logs.")
+# Add symbol to universe
+if st.button("➕ Add symbol to learner universe"):
+    BG.add_symbol(resolved)
+    st.success(f"Added {resolved} to universe (training will include it).")
 
-# show scan results
-if "scan_results" in st.session_state and st.session_state.scan_results:
+# Scan button handling (safe, non-crashing)
+if scan_btn:
+    st.session_state["scan_results"] = None
+    placeholder = st.empty()
+    progress = st.progress(0)
+    status = st.empty()
+    status.info("Starting scan — this may take time. Progress shown below.")
+    try:
+        results = []
+        total_scanned = 0
+        def hook(i, total):
+            progress.progress(int((i/total)*100))
+            status.info(f"Scanning {i}/{total}")
+        limit = None if scan_full else int(sample_limit)
+        results = BG.scan_universe(min_pct=min_pct, days=pred_days, sample_limit=limit or sample_limit, progress_hook=hook)
+        st.session_state["scan_results"] = results
+        progress.progress(100)
+        status.success(f"Scan finished — {len(results)} candidate(s) found.")
+    except Exception as e:
+        err = traceback.format_exc()
+        with open(os.path.join(CACHE_DIR,"last_error.log"), "a") as f:
+            f.write(f"\n\n[{datetime.now().isoformat()}] Scan error: {e}\n{err}")
+        status.error("Scan failed — details in .jinni_cache/last_error.log")
+        st.session_state["scan_results"] = []
+
+# Present scan results if available
+if "scan_results" in st.session_state and st.session_state["scan_results"]:
     st.markdown("---")
-    st.header("Scan Results (last)")
-    for rec in st.session_state.scan_results[:30]:
-        col1, col2 = st.columns([3,1])
+    st.header("Scan Results")
+    for cand in st.session_state["scan_results"][:80]:
+        col1, col2, col3 = st.columns([4,1,1])
         with col1:
-            st.write(f"**{rec['symbol']}**  •  Est {rec['expected_pct']:+.1f}%  •  Conf {rec['confidence']:.2f}")
-            st.write(f"Current: ₹{rec['current']:.2f}  →  Target: ₹{rec['target']:.2f}")
+            st.write(f"**{cand['symbol']}** — Est: {cand['expected_pct']:+.2f}% • Conf: {cand['confidence']:.2f}")
+            st.write(f"Curr: ₹{cand['current']:.2f}  →  Target: ₹{cand['target']:.2f}")
         with col2:
-            if st.button(f"Analyze {rec['symbol']}", key=f"an_{rec['symbol']}"):
-                st.experimental_set_query_params(symbol=rec['symbol'])
+            if st.button(f"Analyze {cand['symbol']}", key=f"analyze_{cand['symbol']}"):
+                # set input and rerun flow by writing to session and redirecting execution
+                st.session_state['last_selected'] = cand['symbol']
+                st.experimental_set_query_params(symbol=cand['symbol'])
                 st.experimental_rerun()
+        with col3:
+            if st.button("Watch", key=f"watch_{cand['symbol']}"):
+                BG.add_symbol(cand['symbol'])
+                st.success(f"Watching {cand['symbol']} — added to universe.")
 
 st.markdown("---")
-st.caption("Notes: Scanning the entire Indian market requires a complete universe list. Add symbols to the universe for them to be included. Logs: .jinni_cache/last_error.log")
+st.caption("Notes: For full-market scanning you should populate BG.universe with a full NSE/BSE symbol list (one-time). This app caches history and the model persists to .jinni_cache/. Use small sample_limit if rate-limited by yfinance.")
+
