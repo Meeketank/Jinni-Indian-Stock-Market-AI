@@ -1,10 +1,9 @@
 # streamlit_app.py
 """
-JINNI — Indian Stock Market AI (Updated)
-- Robust scanning over large universe with progress UI
-- Expanded prediction horizons
-- Defensive error handling & logging
-- Background learner continues to train automatically
+JINNI — Indian Stock Market AI (Fixed number_input max-value issue)
+- Ensures number_input default <= max_value
+- Defensive guards for small/empty universe
+- Retains background learner and scan UI
 """
 
 import streamlit as st
@@ -29,7 +28,6 @@ BG_BATCH_SIZE = 40
 N_LAGS = 6
 MAX_UNIVERSE = 5000
 
-# A reasonable seed universe (will grow when user adds symbols)
 SEED_UNIVERSE = [
     "RELIANCE.NS","TCS.NS","INFY.NS","HDFCBANK.NS","ICICIBANK.NS",
     "HINDUNILVR.NS","BHARTIARTL.NS","KOTAKBANK.NS","LT.NS","SBIN.NS"
@@ -37,7 +35,6 @@ SEED_UNIVERSE = [
 
 # ----------------- Utilities -----------------
 def now_ts(): return time.time()
-
 def cache_path(symbol: str, kind: str="hist") -> str:
     safe = symbol.replace("/", "_").replace(":", "_").replace(" ", "_")
     return os.path.join(CACHE_DIR, f"{safe}__{kind}.pkl")
@@ -72,7 +69,6 @@ def throttle():
         _last_fetch = time.time()
 
 def safe_yf_history(symbol: str, period="1y"):
-    """Safe wrapper to fetch a single ticker history with simple throttling and backoff."""
     attempts = 3
     for i in range(attempts):
         try:
@@ -81,12 +77,11 @@ def safe_yf_history(symbol: str, period="1y"):
             df = t.history(period=period, interval="1d", auto_adjust=True)
             if isinstance(df, pd.DataFrame) and not df.empty:
                 return df
-            # if empty, try next attempt
         except Exception:
             time.sleep(0.5 + i*0.5)
     return None
 
-# ----------------- Feature builder & small online model -----------------
+# ----------------- Features & Simple Online Model -----------------
 def build_features(df: pd.DataFrame, n_lags=N_LAGS):
     if df is None or len(df) < n_lags + 8:
         return np.empty((0, n_lags + 3)), np.empty((0,))
@@ -229,7 +224,6 @@ class BackgroundLearner:
             return dict(self.metrics)
 
     def predict_for(self, symbol: str, days: int = 7) -> Tuple[float, float]:
-        """Return (daily_return_estimate, confidence 0..1). Safe and robust."""
         try:
             if not symbol or not isinstance(symbol, str):
                 return 0.0, 0.0
@@ -254,12 +248,6 @@ class BackgroundLearner:
             return 0.0, 0.0
 
     def scan_high_potential(self, min_pct: float = 10.0, days: int = 7, sample_limit: int = None, progress_callback=None):
-        """
-        Scan universe for high-potential stocks.
-        - sample_limit: how many tickers to test (None => all)
-        - progress_callback: function(current, total) optional
-        Returns: list of dicts sorted by expected magnitude desc
-        """
         results = []
         try:
             pool = list(self.universe)
@@ -267,9 +255,7 @@ class BackgroundLearner:
                 return results
             if sample_limit is None or sample_limit <= 0:
                 sample_limit = len(pool)
-            # limit
             sample_limit = min(sample_limit, len(pool))
-            # shuffle then take first sample_limit
             random.shuffle(pool)
             pool = pool[:sample_limit]
             total = len(pool)
@@ -283,15 +269,12 @@ class BackgroundLearner:
                             continue
                         save_cache(hist, cache_path(s,"hist"))
                     est_daily, conf = self.predict_for(s, days=days)
-                    # scale to given horizon using sqrt scaling (conservative)
                     est_pct = est_daily * (days ** 0.5) * 100
-                    # require both magnitude and minimum confidence
                     if abs(est_pct) >= abs(min_pct) and conf > 0.07:
                         cur = float(hist["Close"].iloc[-1])
                         tgt = cur * (1 + est_daily * (days ** 0.5))
                         results.append({"symbol": s, "expected_pct": est_pct, "confidence": conf, "current": cur, "target": tgt})
                 except Exception:
-                    # continue if single symbol fails
                     pass
                 if progress_callback:
                     try:
@@ -303,18 +286,17 @@ class BackgroundLearner:
         except Exception:
             return results
 
-# ----------------- App UI -----------------
+# ----------------- Streamlit UI -----------------
 st.set_page_config(page_title="JINNI — Indian Stock Market AI", page_icon="🧞", layout="wide")
 st.title("🧞 JINNI — Indian Stock Market AI")
 st.caption("Background training runs automatically. ⚠️ Educational only — not financial advice.")
 
-# init BG learner in session
 if "bg" not in st.session_state:
     st.session_state.bg = BackgroundLearner()
     st.session_state.bg.start()
 BG = st.session_state.bg
 
-# Sidebar controls (left)
+# Sidebar: controls
 with st.sidebar:
     st.header("Controls")
     user_symbol = st.text_input("Enter stock symbol (e.g., RELIANCE or RELIANCE.NS)", value="RELIANCE")
@@ -324,24 +306,46 @@ with st.sidebar:
     st.write("Scan the model's universe for high potential stocks (>= threshold).")
     min_pct = st.number_input("Minimum expected move (%)", value=10.0, step=1.0)
     scan_all = st.checkbox("Scan full universe (may take long)", value=False)
-    sample_limit = None
-    if not scan_all:
-        sample_limit = st.number_input("Max symbols to scan now", min_value=50, max_value=len(BG.universe) if BG.universe else 500, value=400, step=50)
+
+    # --------- FIX: compute universe-based max_value safely ----------
+    uni_len = len(BG.universe) if BG.universe else 0
+    # define sensible minimum and maximum for the input widget
+    widget_min = 10
+    widget_default = 400
+    # If universe empty or small, set a safe max to avoid StreamlitValueAboveMaxError
+    if uni_len <= 0:
+        widget_max = max(100, widget_default)  # allow user to set even if universe empty (but will scan fewer)
+    else:
+        widget_max = max(widget_min, uni_len)
+
+    # Ensure default value <= widget_max
+    widget_default = min(widget_default, widget_max)
+
+    # Provide UI with safe bounds
+    sample_limit = st.number_input(
+        "Max symbols to scan now",
+        min_value=widget_min,
+        max_value=widget_max,
+        value=widget_default,
+        step=50,
+        help="If the universe is small the max will be lowered automatically."
+    )
+    # ----------------------------------------------------------------
+
     if st.button("🔍 Find opportunities"):
-        # perform scan (with progress)
         st.session_state["scan_results"] = None
         placeholder = st.empty()
         progress_bar = st.progress(0)
         status_text = st.empty()
-        total_symbols = len(BG.universe) if scan_all else (sample_limit or min(400, len(BG.universe)))
-        status_text.info(f"Scanning {total_symbols} tickers... please wait.")
-        results = []
+        status_text.info("Starting scan...")
+        # determine sample_limit for scan call (allow full universe if requested)
+        actual_limit = None if scan_all else int(min(sample_limit, len(BG.universe) if BG.universe else sample_limit))
         def progress_cb(i, total):
-            frac = int((i/total)*100)
+            frac = int((i/total)*100) if total>0 else 0
             progress_bar.progress(min(100, frac))
             status_text.info(f"Scanning {i}/{total} ({frac}%)")
         try:
-            results = BG.scan_high_potential(min_pct=min_pct, days=pred_days, sample_limit= (None if scan_all else sample_limit), progress_callback=progress_cb)
+            results = BG.scan_high_potential(min_pct=min_pct, days=pred_days, sample_limit=actual_limit, progress_callback=progress_cb)
             st.session_state["scan_results"] = results
             progress_bar.progress(100)
             status_text.success(f"Scan finished — {len(results)} candidate(s) found.")
@@ -352,6 +356,7 @@ with st.sidebar:
             status_text.error("Scan failed — see logs (.jinni_cache/last_error.log).")
             st.session_state["scan_results"] = []
         st.experimental_rerun()
+
     st.markdown("---")
     st.subheader("Background Model")
     m = BG.get_metrics()
@@ -359,9 +364,9 @@ with st.sidebar:
     st.metric("MAE (EMA)", f"{m.get('mae_ema',0.0):.4f}")
     st.write(f"Trained samples: {m.get('samples',0):,}")
     st.markdown("---")
-    st.info("Tip: Add symbols to training universe using 'Add to universe' on the main page. Scanning the full Indian market will take time and will use cached history when available.")
+    st.info("Tip: Add symbols to training universe using 'Add to universe' on the main page.")
 
-# Main: resolve symbol and fetch history
+# ----------------- Main analysis area -----------------
 st.header("Stock Analysis")
 
 def resolve_and_fetch(symbol: str, period="2y"):
@@ -374,12 +379,10 @@ def resolve_and_fetch(symbol: str, period="2y"):
         candidates = [s_up, s_up.replace(".BO", ".NS"), s_up.replace(".NS", ".BO"), s_up.split(".")[0]]
     else:
         candidates = [s_up, s_up + ".NS", s_up + ".BO", s_up]
-    # try cache first
     for c in candidates:
         cached = load_cache(cache_path(c,"hist"), FETCH_TTL_SECONDS)
         if cached is not None:
             return cached, c + " (cache)"
-    # try batch
     for c in candidates:
         df = safe_yf_history(c, period=period)
         if df is not None and not df.empty:
@@ -395,23 +398,6 @@ if df is None:
     st.stop()
 
 hist = df.copy()
-# add to BG universe (background training) silently
-try:
-    BG.add_to_universe(resolved_label.split()[0])
-except Exception:
-    pass
-
-# quick indicators
-hist["MA20"] = hist["Close"].rolling(20, min_periods=1).mean()
-hist["MA50"] = hist["Close"].rolling(50, min_periods=1).mean()
-delta = hist["Close"].diff()
-gain = delta.where(delta>0,0).rolling(14,min_periods=1).mean()
-loss = (-delta.where(delta<0,0)).rolling(14,min_periods=1).mean().replace(0,np.nan)
-hist["RSI"] = (100 - (100/(1 + (gain/loss).fillna(1.0))))
-hist["RSI"].fillna(50, inplace=True)
-hist["MACD"] = hist["Close"].ewm(span=12, adjust=False).mean() - hist["Close"].ewm(span=26, adjust=False).mean()
-
-# Basic header metrics
 symbol_display = resolved_label.split()[0]
 last_price = float(hist["Close"].iloc[-1])
 prev = float(hist["Close"].iloc[-2]) if len(hist)>1 else last_price
@@ -422,16 +408,25 @@ st.metric("Last Close", f"₹{last_price:.2f}", f"{(last_price-prev):+.2f} ({(la
 def plot_chart(df):
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.6,0.2,0.2])
     fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Price"), row=1, col=1)
-    if "MA20" in df.columns: fig.add_trace(go.Scatter(x=df.index, y=df["MA20"], name="MA20"), row=1, col=1)
-    if "MA50" in df.columns: fig.add_trace(go.Scatter(x=df.index, y=df["MA50"], name="MA50"), row=1, col=1)
     fig.add_trace(go.Bar(x=df.index, y=df["Volume"], name="Volume"), row=2, col=1)
-    if "RSI" in df.columns: fig.add_trace(go.Scatter(x=df.index, y=df["RSI"], name="RSI"), row=3, col=1)
+    # RSI quick calc
+    delta = df["Close"].diff()
+    gain = delta.where(delta>0,0).rolling(14,min_periods=1).mean()
+    loss = (-delta.where(delta<0,0)).rolling(14,min_periods=1).mean().replace(0, np.nan)
+    rsi = (100 - (100/(1 + (gain/loss).fillna(1.0))))
+    fig.add_trace(go.Scatter(x=df.index, y=rsi, name="RSI"), row=3, col=1)
     fig.update_layout(height=700, showlegend=True)
     return fig
 
 st.plotly_chart(plot_chart(hist), use_container_width=True)
 
-# Call BG.predict_for safely
+# add to BG universe (silently)
+try:
+    BG.add_to_universe(symbol_display)
+except Exception:
+    pass
+
+# prediction call
 try:
     est_daily, conf = BG.predict_for(symbol_display, days=pred_days)
     conf_pct = conf * 100.0
@@ -441,19 +436,17 @@ except Exception as e:
     with open(os.path.join(CACHE_DIR,"last_error.log"), "a") as f:
         f.write(f"\n\n[{datetime.now().isoformat()}] Error in predict_for: {e}\n{traceback.format_exc()}")
 
-# Convert daily est to horizon (use sqrt scaling for conservative multi-day scaling)
 pred_price = last_price * (1 + est_daily * (pred_days ** 0.5))
 pred_pct = (pred_price - last_price) / last_price * 100.0
 
-# fallback if model confidence very low -> use simple momentum estimate
+# fallback if model confidence very low
 if conf < 0.08:
     fallback_daily = hist["Close"].pct_change().tail(5).mean() if len(hist) >= 5 else 0.0
     fallback_price = last_price * (1 + fallback_daily * (pred_days ** 0.5))
     pred_price = 0.6 * pred_price + 0.4 * fallback_price
     pred_pct = (pred_price - last_price) / last_price * 100.0
 
-# show results
-# Show potential up/down explicitly for longer horizons: compute 30d/60d/1y estimates too (optional)
+# show card
 def show_prediction_card():
     if pred_pct >= 15:
         sig_style = "background:#d4edda;padding:12px;border-left:6px solid #28a745;border-radius:8px"
@@ -470,12 +463,11 @@ def show_prediction_card():
     else:
         sig_style = "background:#fff3cd;padding:12px;border-left:6px solid #ffc107;border-radius:8px"
         sig_label = "⚪ HOLD"
-
     st.markdown(f"<div style='{sig_style}'><h3>Prediction: {sig_label}</h3><h2>₹{pred_price:.2f}</h2><p>{pred_pct:+.2f}% in {pred_days} days</p><p>Model confidence: {conf_pct:.1f}%</p></div>", unsafe_allow_html=True)
 
 show_prediction_card()
 
-# Trading plan: compute targets 1..4
+# trading plan
 entry = last_price
 stop = entry*(1-0.03) if pred_pct>=0 else entry*(1+0.03)
 targets = [entry*(1 + (pred_pct/100.0) * mult * (pred_days ** 0.5)) for mult in (0.35,0.7,1.05,1.4)]
@@ -490,11 +482,14 @@ for i, t in enumerate(targets, 1):
     st.write(f"- Target {i}: ₹{t:.2f} ({(t-entry)/entry*100:+.1f}%)")
 st.write(f"- Est risk-reward (T2): 1:{rr:.2f}")
 
-# Technical snapshot
+# technical snapshot
 st.subheader("Technical Snapshot")
-rsi_val = float(hist["RSI"].iloc[-1]) if "RSI" in hist.columns else np.nan
-macd_val = float(hist["MACD"].iloc[-1]) if "MACD" in hist.columns else np.nan
-ma50_val = float(hist["MA50"].iloc[-1]) if "MA50" in hist.columns else last_price
+delta = hist["Close"].diff()
+gain = delta.where(delta>0,0).rolling(14,min_periods=1).mean()
+loss = (-delta.where(delta<0,0)).rolling(14,min_periods=1).mean().replace(0,np.nan)
+rsi_val = float((100 - (100/(1 + (gain/loss).fillna(1.0)))) .iloc[-1]) if len(hist)>0 else np.nan
+macd_val = float(hist["Close"].ewm(span=12).mean().iloc[-1] - hist["Close"].ewm(span=26).mean().iloc[-1])
+ma50_val = float(hist["Close"].rolling(50, min_periods=1).mean().iloc[-1])
 vol = float(hist["Close"].pct_change().rolling(20).std().iloc[-1])*np.sqrt(252)*100 if len(hist)>1 else 0.0
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("RSI (14)", f"{rsi_val:.1f}", "Overbought" if rsi_val>70 else ("Oversold" if rsi_val<30 else "Neutral"))
@@ -502,7 +497,7 @@ c2.metric("MACD", f"{macd_val:.3f}", "Bullish" if macd_val>0 else "Bearish")
 c3.metric("Trend (MA50)", "Bullish" if last_price>ma50_val else "Bearish")
 c4.metric("Volatility (ann %)", f"{vol:.2f}%")
 
-# Add symbol to training universe
+# add symbol to universe button
 if st.button("➕ Add this symbol to background training universe"):
     try:
         BG.add_to_universe(symbol_display)
@@ -510,7 +505,7 @@ if st.button("➕ Add this symbol to background training universe"):
     except Exception:
         st.error("Failed to add symbol to universe — see logs.")
 
-# Show scan results if available
+# show scan results
 if "scan_results" in st.session_state and st.session_state.scan_results:
     st.markdown("---")
     st.header("Scan Results (last)")
@@ -525,5 +520,4 @@ if "scan_results" in st.session_state and st.session_state.scan_results:
                 st.experimental_rerun()
 
 st.markdown("---")
-st.caption("Notes: Scanning the entire Indian market requires a complete universe list. Add symbols to the universe for them to be included. Scanning many tickers can take minutes; progress is shown while scanning. Logs: .jinni_cache/last_error.log")
-
+st.caption("Notes: Scanning the entire Indian market requires a complete universe list. Add symbols to the universe for them to be included. Logs: .jinni_cache/last_error.log")
