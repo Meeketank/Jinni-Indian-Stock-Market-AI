@@ -97,7 +97,7 @@ class BackgroundLearner:
         self.lock = threading.Lock()
 
     def _default_universe(self) -> List[str]:
-"""Return empty list - uses only user-provided stock"""
+        """Return empty list - uses only user-provided stock"""
         return []
     def start(self):
         if self._thread and self._thread.is_alive():
