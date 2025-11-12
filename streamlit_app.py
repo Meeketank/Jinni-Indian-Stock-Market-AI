@@ -1,12 +1,7 @@
 # streamlit_app.py
 """
 JINNI - AI-Powered Indian Stock Market Analysis System (single-file)
-Full app with:
- - robust symbol resolver + caching
- - continuous background learner (online SGD)
- - scanning/recommendations with progress UI
- - technical & basic fundamental analysis
- - multi-horizon predictions & targets
+Fixed / hardened version (Streamlit-safe defaults and better error handling).
 """
 
 import streamlit as st
@@ -28,7 +23,7 @@ MODEL_PATH = os.path.join(CACHE_DIR, "background_model.pkl")
 SEARCH_CACHE = os.path.join(CACHE_DIR, "yahoo_search_cache.pkl")
 SYMBOLS_CACHE = os.path.join(CACHE_DIR, "universe_symbols.pkl")
 
-# Universe source (small fallback list if download fails). You can replace with your own list.
+# Universe source fallback list
 FALLBACK_UNIVERSE = [
     "RELIANCE.NS","TCS.NS","INFY.NS","HDFCBANK.NS","ICICIBANK.NS",
     "HINDUNILVR.NS","BHARTIARTL.NS","KOTAKBANK.NS","LT.NS","SBIN.NS",
@@ -86,23 +81,19 @@ def yahoo_search_symbol(query: str) -> List[str]:
     qk = q.upper()
     if qk in _search_cache:
         return _search_cache[qk]
+    candidates = []
     try:
         throttle_fetch()
         r = requests.get(YAHOO_SEARCH_URL, params={"q": qk, "quotesCount": 10, "newsCount": 0}, timeout=6)
-        candidates = []
         if r.status_code == 200:
             j = r.json()
             for itm in j.get("quotes", []):
                 sym = itm.get("symbol")
                 if sym:
                     candidates.append(sym.upper())
-        else:
-            candidates = []
     except Exception as e:
         log_error(f"yahoo_search_symbol error for {q}: {e}")
-        candidates = []
     if not candidates:
-        # Add common variants
         candidates = [qk + suf for suf in ["", ".NS", ".BO", ".NSE", ".BSE"]]
     # dedupe
     seen = set(); out = []
@@ -114,7 +105,7 @@ def yahoo_search_symbol(query: str) -> List[str]:
     return out
 
 def resolve_symbol(user_input: str, period="1y") -> Tuple[pd.DataFrame,str]:
-    """Resolve a user-entered stock name/symbol to a ticker and return history dataframe (or (None,None))."""
+    """Resolve user-entered stock name/symbol to a ticker and return history dataframe (or (None,None))."""
     if not user_input:
         return None, None
     s = user_input.strip()
@@ -130,7 +121,7 @@ def resolve_symbol(user_input: str, period="1y") -> Tuple[pd.DataFrame,str]:
     # add Yahoo suggestions (prefer them first)
     try:
         ycs = yahoo_search_symbol(s)
-        for yc in reversed(ycs):  # insert in front
+        for yc in reversed(ycs):
             if yc not in candidates:
                 candidates.insert(0, yc)
     except Exception:
@@ -139,7 +130,6 @@ def resolve_symbol(user_input: str, period="1y") -> Tuple[pd.DataFrame,str]:
     last_err = None
     for c in candidates:
         try:
-            # try cached history first
             cache_path = os.path.join(CACHE_DIR, f"hist_{c}.pkl")
             hist = load_pickle(cache_path)
             if hist is not None and not hist.empty:
@@ -161,15 +151,13 @@ def resolve_symbol(user_input: str, period="1y") -> Tuple[pd.DataFrame,str]:
 
 # ---- UNIVERSE LOADER ----
 def load_universe(force_refresh=False) -> List[str]:
-    """Load NSE+BSE symbol universe. Tries cached file, then remote CSV (recommend replacing URL), else fallback list."""
+    """Load NSE+BSE symbol universe. Tries cached file, then remote CSV, else fallback list."""
     if not force_refresh:
         cached = load_pickle(SYMBOLS_CACHE)
         if cached and isinstance(cached, list) and len(cached) > 10:
             return cached
-    # try to download a prepared symbol list (you may replace this URL with your own)
     try:
         throttle_fetch()
-        # Sample GitHub raw file that users often host — replace with real source if you have one.
         url = "https://raw.githubusercontent.com/Meeket/sample-data/main/indian_tickers_sample.csv"
         r = requests.get(url, timeout=6)
         if r.status_code == 200:
@@ -180,7 +168,6 @@ def load_universe(force_refresh=False) -> List[str]:
                 if not line: continue
                 s = line.split(",")[0].strip()
                 if not s.endswith(".NS") and not s.endswith(".BO"):
-                    # try normalize to .NS as primary
                     s = s + ".NS"
                 syms.append(s.upper())
             if len(syms) > 10:
@@ -188,7 +175,6 @@ def load_universe(force_refresh=False) -> List[str]:
                 return syms
     except Exception:
         pass
-    # fallback
     save_pickle(FALLBACK_UNIVERSE, SYMBOLS_CACHE)
     return FALLBACK_UNIVERSE
 
@@ -237,11 +223,6 @@ class OnlineLinearModel:
 
 # ---- BACKGROUND LEARNER ----
 class BackgroundLearner:
-    """
-    - Maintains universe list (can be expanded).
-    - Background thread samples tickers, builds lag-return features and trains model.
-    - Keeps EMA metrics for directional accuracy and MAE.
-    """
     def __init__(self, model_path=MODEL_PATH, n_lags=5, interval_sec=20):
         self.model_path = model_path
         self.n_lags = n_lags
@@ -249,8 +230,7 @@ class BackgroundLearner:
         self.universe = load_universe()
         self.model = OnlineLinearModel(n_features=self.n_lags, lr=0.003)
         self.model.load(self.model_path)
-        # EMA metrics
-        self.ema_alpha = 0.02  # slow EMA for stability
+        self.ema_alpha = 0.02
         self.metrics = {
             "directional_accuracy_ema": 0.0,
             "mae_ema": np.nan,
@@ -294,7 +274,6 @@ class BackgroundLearner:
             return None
 
     def _build_features(self, df: pd.DataFrame):
-        """returns X (m,n_lags) and y (m,) where y is next-day return"""
         if df is None or len(df) <= self.n_lags + 1:
             return np.empty((0, self.n_lags)), np.empty((0,))
         closes = df['Close'].values
@@ -309,9 +288,9 @@ class BackgroundLearner:
         if preds.size == 0:
             return
         mae = np.mean(np.abs(preds - truths))
+        # allow numeric comparison even when zeros present
         dir_acc = float(np.mean(np.sign(preds) == np.sign(truths)))
         with self.lock:
-            # EMA update
             prev_da = self.metrics["directional_accuracy_ema"]
             prev_mae = self.metrics["mae_ema"]
             a = self.ema_alpha
@@ -322,7 +301,6 @@ class BackgroundLearner:
     def _loop(self):
         while not self._stop.is_set():
             try:
-                # sample a small batch randomly from universe to avoid huge load
                 if not self.universe:
                     time.sleep(self.interval_sec)
                     continue
@@ -332,19 +310,16 @@ class BackgroundLearner:
                     if self._stop.is_set(): break
                     df = self._fetch_history(sym, days=180)
                     X, y = self._build_features(df)
-                    if X.size == 0: 
+                    if X.size == 0:
                         continue
                     preds = self.model.predict(X)
                     self._update_ema_metrics(preds, y)
-                    # incremental update with small mini-batches
-                    # shuffle for SGD diversity
                     idx = np.arange(len(y))
                     np.random.shuffle(idx)
                     split = max(1, len(y)//4)
                     for start in range(0, len(y), split):
                         end = min(len(y), start+split)
                         self.model.partial_fit(X[idx[start:end]], y[idx[start:end]])
-                    # sometimes persist
                     if random.random() < 0.15:
                         self.model.save(self.model_path)
                     time.sleep(0.2)
@@ -354,7 +329,6 @@ class BackgroundLearner:
                 time.sleep(self.interval_sec)
 
     def predict_for(self, ticker: str, n_lags=None) -> Tuple[float, float]:
-        """Return predicted next-day return (float) and confidence (0-100)"""
         n = n_lags or self.n_lags
         df = self._fetch_history(ticker, days=90)
         if df is None or len(df) <= n:
@@ -370,10 +344,6 @@ class BackgroundLearner:
         return pred, conf
 
     def scan_high_potential(self, min_pct: float=7.0, days:int=7, sample_limit:int=200, progress_cb=None) -> List[Dict]:
-        """
-        Scan up to sample_limit tickers from universe and return items with predicted_return >= min_pct (abs).
-        progress_cb: function(i, total) called during loop (for streamlit progress)
-        """
         results = []
         tickers = list(self.universe)
         if not tickers:
@@ -383,14 +353,14 @@ class BackgroundLearner:
         total = len(tickers)
         for i, t in enumerate(tickers, start=1):
             if progress_cb:
-                progress_cb(i, total)
+                try:
+                    progress_cb(i, total)
+                except Exception:
+                    pass
             try:
                 pred_ret, conf = self.predict_for(t)
-                # convert next-day predicted return to days horizon
                 est_pct = pred_ret * days * 100.0
-                # only return high-confidence results (conf > 30) to reduce spam
                 if abs(est_pct) >= min_pct and conf > 25:
-                    # fetch last close
                     throttle_fetch()
                     tk = yf.Ticker(t)
                     df = tk.history(period="5d", interval="1d", auto_adjust=True)
@@ -406,7 +376,6 @@ class BackgroundLearner:
             except Exception as e:
                 log_error(f"scan_high_potential error {t}: {e}")
                 continue
-        # sort by descending estimated pct
         results.sort(key=lambda x: abs(x['est_pct']), reverse=True)
         return results
 
@@ -441,7 +410,6 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def enhanced_model_prediction(df: pd.DataFrame, days:int=7) -> float:
-    """A rule-based strong-enough forecast to combine with BG learner. Returns predicted price (absolute)."""
     if df is None or df.empty:
         return 0.0
     df = calculate_indicators(df)
@@ -451,24 +419,21 @@ def enhanced_model_prediction(df: pd.DataFrame, days:int=7) -> float:
     ma20 = df['MA20'].iloc[-1] if 'MA20' in df else current
     ma50 = df['MA50'].iloc[-1] if 'MA50' in df else current
     trend = 0.05 if ma20 > ma50 else -0.03
-    momentum = recent_5*0.6 + recent_20*0.4
+    momentum = (recent_5 if not np.isnan(recent_5) else 0.0)*0.6 + (recent_20 if not np.isnan(recent_20) else 0.0)*0.4
     vol = df['Volatility'].iloc[-1] / 100.0 if 'Volatility' in df else 0.2
-    # Combine
     change = (momentum + trend) * math.sqrt(days/7) - vol*0.05
     change = max(-0.6, min(0.6, change))
     return current * (1 + change)
 
 def compute_targets(current_price:float, predicted_price:float, days:int) -> Tuple[float,float,List[float],float]:
     entry = current_price
-    pred_return = (predicted_price - current_price)/current_price
-    # stop loss 3% for buys, 3% for shorts (flip)
+    pred_return = (predicted_price - current_price)/current_price if current_price != 0 else 0.0
     stop_loss = entry*(1 - 0.03) if pred_return >= 0 else entry*(1 + 0.03)
-    # create 4 targets conservatively scaling with pred_return and duration
     mult_time = math.sqrt(max(1, days)/7)
     targets = []
     for factor in [0.3,0.6,1.0,1.5]:
         targets.append(entry + pred_return*entry*factor*mult_time)
-    reward = abs(targets[1]-entry)
+    reward = abs(targets[1]-entry) if len(targets) > 1 else 0.0
     risk = abs(entry-stop_loss)
     rr = (reward/risk) if risk>0 else 0.0
     return entry, stop_loss, targets, rr
@@ -477,18 +442,19 @@ def compute_targets(current_price:float, predicted_price:float, days:int) -> Tup
 def create_chart(df: pd.DataFrame, symbol:str) -> go.Figure:
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.06, row_heights=[0.55,0.2,0.25])
     fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Price'), row=1, col=1)
-    # add moving averages
     for ma in ['MA20','MA50','MA200']:
         if ma in df.columns:
             fig.add_trace(go.Scatter(x=df.index, y=df[ma], name=ma, line=dict(width=1.5)), row=1, col=1)
-    # volume
     colors = ['green' if r['Close']>=r['Open'] else 'red' for _,r in df.iterrows()]
     fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color=colors, name='Volume'), row=2, col=1)
-    # RSI + MACD
     if 'RSI' in df.columns:
         fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], name='RSI'), row=3, col=1)
-        fig.add_hline(y=70, line_dash='dash', line_color='red', row=3, col=1)
-        fig.add_hline(y=30, line_dash='dash', line_color='green', row=3, col=1)
+        try:
+            fig.add_hline(y=70, line_dash='dash', line_color='red', row=3, col=1)
+            fig.add_hline(y=30, line_dash='dash', line_color='green', row=3, col=1)
+        except Exception:
+            # older plotly versions may not support row/col with add_hline - ignore if so
+            pass
     if 'MACD' in df.columns:
         fig.add_trace(go.Scatter(x=df.index, y=df['MACD'], name='MACD'), row=3, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['MACD_Signal'], name='Signal'), row=3, col=1)
@@ -517,7 +483,10 @@ st.write("---")
 # instantiate background learner once
 if "BG" not in st.session_state:
     st.session_state.BG = BackgroundLearner(interval_sec=15)
-    st.session_state.BG.start()
+    try:
+        st.session_state.BG.start()
+    except Exception as e:
+        log_error(f"BG.start error: {e}")
 
 BG = st.session_state.BG
 
@@ -528,19 +497,40 @@ with st.sidebar:
     horizon_days = st.selectbox("Prediction horizon (days)", options=[1,3,7,14,30,60,90,180,365,1825], index=2)
     st.markdown("**Recommendations**")
     min_expected = st.number_input("Minimum expected move (%)", value=7.0, min_value=1.0, step=1.0)
-    max_scan = st.number_input("Max symbols to scan now", min_value=50, max_value=len(BG.universe) if BG.universe else 500, value=min(300, max(50, len(BG.universe) or 100)), step=25)
+
+    # Safe handling for max_scan number_input (ensure default <= max)
+    try:
+        universe_len = len(BG.universe) if BG and BG.universe is not None else 0
+    except Exception:
+        universe_len = 0
+    max_universe = universe_len if universe_len >= 50 else max(50, universe_len or 500)
+    default_value = min(300, max(50, universe_len or 100))
+    if default_value > max_universe:
+        default_value = max_universe
+    max_scan = st.number_input("Max symbols to scan now",
+                               min_value=50,
+                               max_value=int(max_universe),
+                               value=int(default_value),
+                               step=25)
+
     st.write("---")
     st.subheader("Model (background)")
-    metrics = BG.get_metrics()
-    st.metric("Directional accuracy (EMA)", f"{metrics.get('directional_accuracy_ema',0.0)*100:.2f}%")
-    st.metric("MAE (EMA)", f"{metrics.get('mae_ema',float('nan')):.4f}")
+    metrics = BG.get_metrics() if BG else {}
+    da = metrics.get('directional_accuracy_ema', 0.0)
+    mae = metrics.get('mae_ema', float('nan'))
+    st.metric("Directional accuracy (EMA)", f"{da*100:.2f}%")
+    st.metric("MAE (EMA)", f"{mae:.4f}")
     st.write(f"Trained samples: {metrics.get('trained_samples',0):,}")
     st.write("Model: online regressor (fast SGD). Improves as more data is trained.")
     st.write("---")
     if st.button("Populate Universe (download symbols)"):
         st.info("Fetching symbol list — this may take a few seconds.")
-        syms = load_universe(force_refresh=True)
-        st.success(f"Universe loaded with {len(syms):,} symbols.")
+        try:
+            syms = load_universe(force_refresh=True)
+            st.success(f"Universe loaded with {len(syms):,} symbols.")
+        except Exception as e:
+            st.error("Failed to download universe.")
+            log_error(f"populate_universe error: {e}")
 
 # Main controls area
 col1, col2 = st.columns([1,2])
@@ -550,13 +540,12 @@ with col1:
     if st.button("Scan & Recommend (use model)"):
         st.session_state.scan_results = None
         st.session_state.scan_status = "running"
-        # run scanning in this request with progress bar
         progress = st.progress(0)
         placeholder = st.empty()
         try:
-            results = []
             def progress_cb(i,total):
-                progress.progress(min(100, int((i/total)*100)))
+                pct = min(100, int((i/total)*100)) if total else 100
+                progress.progress(pct)
             results = BG.scan_high_potential(min_pct=min_expected, days=horizon_days, sample_limit=int(max_scan), progress_cb=progress_cb)
             st.session_state.scan_results = results
             st.session_state.scan_status = "done"
@@ -575,15 +564,13 @@ with col1:
             with st.expander(f"{r['symbol']} — Est: {r['est_pct']:+.2f}% | Conf: {r['confidence']:.1f}%"):
                 st.write(f"Last close: ₹{r['last_close']:.2f}")
                 if st.button(f"Analyze {r['symbol']}", key=f"an_{r['symbol']}"):
-                    # put symbol into input and run analysis below
-                    input_symbol = r['symbol']
-                    st.session_state['analysis_symbol'] = input_symbol
+                    # save analysis symbol in session state
+                    st.session_state['analysis_symbol'] = r['symbol']
 
 with col2:
     st.markdown("### Stock analysis")
     symbol_to_analyze = st.session_state.get('analysis_symbol') or input_symbol
     st.write(f"Symbol (raw input): {symbol_to_analyze}")
-    # resolve symbol
     period_map = {
         1:"5d", 3:"5d", 7:"1mo", 14:"3mo", 30:"3mo", 60:"6mo", 90:"1y",180:"2y",365:"5y",1825:"10y"
     }
@@ -594,7 +581,6 @@ with col2:
     else:
         st.success(f"Resolved to: {resolved}")
         hist = calculate_indicators(hist)
-        # header metrics
         last_close = float(hist['Close'].iloc[-1])
         prev_close = float(hist['Close'].iloc[-2]) if len(hist)>1 else last_close
         delta = last_close - prev_close
@@ -604,51 +590,46 @@ with col2:
         c2.metric("Day High", f"₹{float(hist['High'].iloc[-1]):.2f}")
         c3.metric("Day Low", f"₹{float(hist['Low'].iloc[-1]):.2f}")
         c4.metric("Volume", f"{int(hist['Volume'].iloc[-1]):,}")
-        yf_info = None
+        yf_info = {}
         try:
             throttle_fetch()
             tk = yf.Ticker(resolved)
-            yf_info = tk.info
+            # some yfinance versions raise on .info; guard it
+            try:
+                yf_info = tk.info or {}
+            except Exception:
+                yf_info = {}
         except Exception:
             yf_info = {}
         if yf_info and yf_info.get('marketCap'):
-            c5.metric("Market Cap (Cr)", f"₹{yf_info.get('marketCap')/1e7:.2f}")
+            try:
+                c5.metric("Market Cap (Cr)", f"₹{yf_info.get('marketCap')/1e7:.2f}")
+            except Exception:
+                c5.metric("Volatility", f"{hist['Volatility'].iloc[-1]:.2f}%")
         else:
             c5.metric("Volatility", f"{hist['Volatility'].iloc[-1]:.2f}%")
-        # chart
         st.plotly_chart(create_chart(hist, resolved), use_container_width=True)
-        # predictions
+
         with st.spinner("Generating predictions..."):
-            # BG prediction
             est_daily_ret, conf = BG.predict_for(resolved)
-            # combine with enhanced model
             enhanced_price = enhanced_model_prediction(hist, days=horizon_days)
-            # convert BG next-day return to days-horizon predicted price
             pred_price_bg = last_close*(1 + est_daily_ret*horizon_days)
-            # combine weights: BG confidence -> scale
             bg_weight = min(0.9, conf/100.0)
             final_pred_price = pred_price_bg*bg_weight + enhanced_price*(1-bg_weight)
-            pred_pct = (final_pred_price - last_close)/last_close*100.0
-            # compute targets
+            pred_pct = (final_pred_price - last_close)/last_close*100.0 if last_close != 0 else 0.0
             entry, stop_loss, targets, rr = compute_targets(last_close, final_pred_price, horizon_days)
-            # fundamentals
             fundamentals = extract_fundamentals(yf_info)
-        # Recommendation block
+
         if pred_pct >= 15:
             rec = "🔵 STRONG BUY"
-            style = "buy"
         elif pred_pct >= 5:
             rec = "🟢 BUY"
-            style = "buy"
         elif pred_pct <= -15:
             rec = "🔴 STRONG SELL"
-            style = "sell"
         elif pred_pct <= -5:
             rec = "🔴 SELL"
-            style = "sell"
         else:
             rec = "⚪ HOLD"
-            style = "hold"
         st.markdown(f"### Recommendation: **{rec}**")
         st.markdown(f"**Predicted price in {horizon_days} days:** ₹{final_pred_price:.2f} ({pred_pct:+.2f}%)")
         st.markdown(f"**Model confidence:** {conf:.1f}%  |  **BG Accuracy (EMA):** {metrics.get('directional_accuracy_ema',0.0)*100:.2f}%")
@@ -658,24 +639,28 @@ with col2:
         for i,t in enumerate(targets,1):
             st.write(f"- Target {i}: ₹{t:.2f}  ({(t-entry)/entry*100:+.2f}%)")
         st.write(f"- Est. Risk-Reward (T2): 1:{rr:.2f}")
-        # Technical summary
+
         st.markdown("### Technical Summary")
         st.write(f"- RSI (14): {hist['RSI'].iloc[-1]:.2f}")
         st.write(f"- MACD: {hist['MACD'].iloc[-1]:.4f} (Signal: {hist['MACD_Signal'].iloc[-1]:.4f})")
         st.write(f"- MA20: {hist['MA20'].iloc[-1]:.2f}  MA50: {hist['MA50'].iloc[-1]:.2f}  MA200: {hist['MA200'].iloc[-1]:.2f}")
         st.write(f"- Volatility (ann): {hist['Volatility'].iloc[-1]:.2f}%")
-        # Fundamentals
+
         st.markdown("### Fundamental Snapshot (from Yahoo if available)")
         if fundamentals:
             for k,v in fundamentals.items():
                 st.write(f"- {k}: {v}")
         else:
             st.info("No fundamental metrics found in Yahoo info for this ticker.")
-        # Add symbol to universe for training if not present
+
         if resolved and resolved not in BG.universe:
             if st.button(f"Add {resolved} to training universe"):
-                BG.add_symbol(resolved)
-                st.success(f"{resolved} added to universe for background training.")
+                try:
+                    BG.add_symbol(resolved)
+                    st.success(f"{resolved} added to universe for background training.")
+                except Exception as e:
+                    st.error("Failed to add symbol to universe.")
+                    log_error(f"add_symbol error: {e}")
 
 st.write("---")
 st.markdown("<small>Tip: populate universe then click 'Scan & Recommend'. Background learner will continue training automatically.</small>", unsafe_allow_html=True)
