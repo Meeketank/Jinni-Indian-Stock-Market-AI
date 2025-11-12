@@ -24,7 +24,7 @@ from bs4 import BeautifulSoup
 warnings.filterwarnings("ignore")
 
 # Import enhanced modules
-from enhanced_learner import EnhancedBackgroundLearner
+from online_learning.background_learner import EnhancedBackgroundLearner
 from fundamental_analyzer import FundamentalAnalyzer
 from realtime_price import RealTimePriceTracker
 
