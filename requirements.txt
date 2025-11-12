@@ -37,10 +37,22 @@ flask>=2.3.0
 # Technical Analysis
 TA-Lib>=0.4.24
 pandas-ta>=0.3.14b
+ta>=0.10.0
 
 # Time Series
 statsmodels>=0.14.0
 prophet>=1.1.4
+arch>=6.2.0
+
+# Ensemble & Advanced ML
+xgboost>=1.7.0
+lightgbm>=4.1.0
+catboost>=1.2.0
+
+# Real-time & WebSocket
+websocket-client>=1.6.0
+websockets>=12.0
+aiohttp>=3.8.0
 
 # Utilities
 python-dotenv>=1.0.0
@@ -48,6 +60,7 @@ pytz>=2023.3
 python-dateutil>=2.8.2
 joblib>=1.3.0
 tqdm>=4.65.0
+colorama>=0.4.6
 
 # API & Cloud
 fastapi>=0.100.0
@@ -55,3 +68,70 @@ uvicorn>=0.23.0
 
 # Performance
 numba>=0.57.0
+
+# Financial Data Specific
+alpha-vantage>=2.3.1
+pandas-datareader>=0.10.0
+quandl>=3.7.0
+
+# News & Sentiment Analysis
+newspaper3k>=0.2.8
+textblob>=0.17.1
+vaderSentiment>=3.3.2
+transformers>=4.30.0
+
+# Database & Caching
+redis>=5.0.0
+pymysql>=1.1.0
+sqlite3>=2.6.0
+
+# Deployment & Monitoring
+gunicorn>=21.2.0
+prometheus-client>=0.17.0
+psutil>=5.9.0
+
+# Date/Time Handling
+arrow>=1.2.3
+pendulum>=2.1.2
+
+# Configuration
+pyyaml>=6.0
+toml>=0.10.2
+
+# Logging
+loguru>=0.7.0
+structlog>=23.1.0
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+
+# Type Checking
+mypy>=1.5.0
+types-requests>=2.31.0
+
+# Code Quality
+black>=23.7.0
+flake8>=6.1.0
+isort>=5.12.0
+
+# Additional Math & Statistics
+sympy>=1.12.0
+networkx>=3.1
+
+# Image Processing (for charts)
+Pillow>=10.0.0
+opencv-python>=4.8.0
+
+# Alternative Data Sources
+twelvedata>=1.0.0
+yahoofinancials>=1.6.0
+
+# Risk Analysis
+pyportfolioopt>=1.5.5
+riskfolio-lib>=3.3.0
+
+# Backtesting
+backtrader>=1.9.78.123
+vectorbt>=0.25.0
