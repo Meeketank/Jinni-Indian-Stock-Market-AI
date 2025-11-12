@@ -302,29 +302,50 @@ def run_analysis():
             unsafe_allow_html=True,
         )
 
-    # Intelligent Recommendation using TradingSignals (if available)
-    signal = None
-    if TradingSignals is not None:
-        try:
-            ts = TradingSignals()
-            raw_signal = ts.generate_trading_signal(
-                current_price=current_price,
-                predicted_price=pred_price,
-                prediction_confidence=0.80,
-                technical_indicators=hist,
-                historical_data=hist,
-            )
-            signal = safe_signal_defaults(raw_signal, current_price)
-        except Exception as e:
-            st.warning(f"TradingSignals error: {e}")
-            signal = safe_signal_defaults({}, current_price)
+
+        # INTELLIGENT RECOMMENDATION - Aligns with predictions and technical analysis
+    # Calculate recommendation based on prediction and RSI
+    rsi = hist['RSI'].iloc[-1] if 'RSI' in hist.columns and len(hist) > 0 else 50
+    ma_signal_value = ma_signal  # From technical analysis above
+    
+    if pred_change >= 20:
+        base_recommendation = "🟢 STRONG BUY"
+        reason = f"Strong upside potential: +{pred_change:.1f}% predicted growth"
+    elif pred_change >= 10:
+        base_recommendation = "🟢 BUY"
+        reason = f"Good upside potential: +{pred_change:.1f}% predicted growth"
+    elif pred_change >= 3:
+        base_recommendation = "🟡 BUY (Moderate)"
+        reason = f"Moderate upside: +{pred_change:.1f}% predicted growth"
+    elif pred_change <= -20:
+        base_recommendation = "🔴 STRONG SELL"
+        reason = f"Strong downside risk: {pred_change:.1f}% predicted decline"
+    elif pred_change <= -10:
+        base_recommendation = "🔴 SELL"
+        reason = f"Downside risk: {pred_change:.1f}% predicted decline"
+    elif pred_change <= -3:
+        base_recommendation = "🟠 SELL (Moderate)"
+        reason = f"Moderate downside: {pred_change:.1f}% predicted decline"
     else:
-        signal = safe_signal_defaults({}, current_price)
-
-    recommendation = signal.get("action", "HOLD")
-    reason = signal.get("reasoning", "No reasoning available.")
-    confidence_level = signal.get("confidence", 0.0)
-
+        base_recommendation = "⚪ HOLD"
+        reason = f"Neutral outlook: {pred_change:+.1f}% predicted change"
+    
+    # Adjust for RSI overbought/oversold
+    if rsi > 75 and "BUY" in base_recommendation:
+        reason += f" | ⚠️ RSI overbought ({rsi:.1f}) - consider waiting"
+    elif rsi < 25 and "SELL" in base_recommendation:
+        reason += f" | ⚠️ RSI oversold ({rsi:.1f}) - may bounce"
+    
+    # Align with MA signal
+    if ma_signal_value == "Bullish" and "SELL" in base_recommendation:
+        reason += " | Note: MA trend is bullish"
+    elif ma_signal_value == "Bearish" and "BUY" in base_recommendation:
+        reason += " | Note: MA trend is bearish"
+    
+    recommendation = base_recommendation
+    confidence_level = min(95, 70 + abs(pred_change) * 1.5)  # Higher confidence for stronger predictions
+    # Intelligent Recommendation using TradingSignals (if available)
+    
     with col2:
         st.markdown(
             f"""
