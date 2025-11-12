@@ -107,9 +107,47 @@ class BackgroundLearner:
     def _default_universe(self) -> List[str]:
         # A reasonable short default universe (NSE tickers with .NS)
         # You can expand this list as needed
-        return [
-            "RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS",
-            "HINDUNILVR.NS", "BHARTIARTL.NS", "KOTAKBANK.NS", "LT.NS", "SBIN.NS"
+        return [return [
+            # Nifty 50
+            "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS",
+            "HINDUNILVR.NS", "ITC.NS", "SBIN.NS", "BHARTIARTL.NS", "KOTAKBANK.NS",
+            "LT.NS", "AXISBANK.NS", "ASIANPAINT.NS", "MARUTI.NS", "SUNPHARMA.NS",
+            "TITAN.NS", "BAJFINANCE.NS", "ULTRACEMCO.NS", "NESTLEIND.NS", "WIPRO.NS",
+            "HCLTECH.NS", "TECHM.NS", "M&M.NS", "ONGC.NS", "NTPC.NS",
+            "POWERGRID.NS", "TATASTEEL.NS", "ADANIENT.NS", "BAJAJFINSV.NS", "COALINDIA.NS",
+            "TATAMOTORS.NS", "HINDALCO.NS", "JSWSTEEL.NS", "INDUSINDBK.NS", "BPCL.NS",
+            "CIPLA.NS", "DRREDDY.NS", "EICHERMOT.NS", "GRASIM.NS", "HEROMOTOCO.NS",
+            "DIVISLAB.NS", "APOLLOHOSP.NS", "BRITANNIA.NS", "SHRIRAMFIN.NS", "ADANIPORTS.NS",
+            "TATACONSUM.NS", "SBILIFE.NS", "BAJAJ-AUTO.NS", "LTIM.NS", "TRENT.NS",
+            # Nifty Next 50
+            "ADANIPOWER.NS", "AMBUJACEM.NS", "ACC.NS", "GODREJCP.NS", "HAVELLS.NS",
+            "MOTHERSON.NS", "SIEMENS.NS", "DLF.NS", "PIDILITIND.NS", "GAIL.NS",
+            "BOSCHLTD.NS", "INDIGO.NS", "VEDL.NS", "BANKBARODA.NS", "PNB.NS",
+            "COLPAL.NS", "DABUR.NS", "TORNTPHARM.NS", "LUPIN.NS", "BIOCON.NS",
+            "GODREJPROP.NS", "BERGEPAINT.NS", "MARICO.NS", "NMDC.NS", "HAL.NS",
+            "BEL.NS", "IDEA.NS", "SAIL.NS", "UPL.NS", "SHREECEM.NS",
+            # Midcap & Others (100+ more)
+            "ZOMATO.NS", "PAYTM.NS", "NYKAA.NS", "IRCTC.NS", "IRFC.NS",
+            "RVNL.NS", "NBCC.NS", "PFC.NS", "RECLTD.NS", "HUDCO.NS",
+            "CANBK.NS", "UNIONBANK.NS", "INDIANB.NS", "IDFCFIRSTB.NS", "FEDERALBNK.NS",
+            "BANDHANBNK.NS", "RBLBANK.NS", "AUBANK.NS", "YESBANK.NS", "JUBLFOOD.NS",
+            "DIXON.NS", "AFFLE.NS", "COFORGE.NS", "PERSISTENT.NS", "LTTS.NS",
+            "MPHASIS.NS", "MINDTREE.NS", "CYIENT.NS", "HAPPSTMNDS.NS", "ROUTE.NS",
+            "POLYCAB.NS", "KEI.NS", "ASTRAL.NS", "SUPREME IND.NS", "RELAXO.NS",
+            "BATA.NS", "VBL.NS", "TATAPOWER.NS", "JSW ENERGY.NS", "ADANIGREEN.NS",
+            "TORNTPOWER.NS", "ABB.NS", "CUMMINSIND.NS", "VOLTAS.NS", "CROMPTON.NS",
+            "WHIRLPOOL.NS", "SYMPHONY.NS", "BAJAJHLDNG.NS", "CHOLAFIN.NS", "MUTHOOTFIN.NS",
+            "LICH SGFIN.NS", "PEL.NS", "DMART.NS", "TATAELXSI.NS", "MCDOWELL-N.NS",
+            "PIIND.NS", "PAGEIND.NS", "ALKEM.NS", "LAURUSLABS.NS", "GLENMARK.NS",
+            "SUNPHARMA.NS", "LALPATHLAB.NS", "METROPOLIS.NS", "FORTIS.NS", "MAXHEALTH.NS",
+            "JKCEMENT.NS", "RAMCOCEM.NS", "HEIDELBERG.NS", "STAR CEMENT.NS", "ORIENT CEMENT.NS",
+            "ASHOKLEY.NS", "ESCORTS.NS", "TVSMOT OR.NS", "BAJAJ-AUTO.NS", "EXIDEIND.NS",
+            "AMARAJABAT.NS", "MRF.NS", "APOLLOTYRE.NS", "CEAT.NS", "BALKRISIND.NS",
+            "MCX.NS", "CDSL.NS", "CAMS.NS", "FACT.NS", "DEEPAKNTR.NS",
+            "AARTI IND.NS", "GNFC.NS", "CHAMBLFERT.NS", "COROMANDEL.NS", "PIIND.NS",
+            "MANYAVAR.NS", "V-MART.NS", "ABFRL.NS", "RAYMOND.NS", "GOKEX.NS",
+            "IEX.NS", "ADANIGAS.NS", "GUJGASLTD.NS", "IGL.NS", "MGL.NS",
+            "GMRINFRA.NS", "CONCOR.NS", "AEGISCHEM.NS", "CLEAN SCIENCE.NS", "FINE.NS"
         ]
 
     def start(self):
@@ -340,7 +378,7 @@ def simple_prediction(df, days):
     recent_60d_change = df["Close"].pct_change().tail(60).mean()
     
     # Momentum-based prediction (weighted recent changes)
-    momentum_factor = (recent_5d_change * 0.5 + recent_20d_change * 0.3 + recent_60d_change * 0.2)
+    momentum_factor = (recent_5d_change * 10 + recent_20d_change * 5 + recent_60d_change * 0.2)
     
     # Amplify the prediction based on days horizon (longer = more movement expected)
     time_multiplier = np.sqrt(days / 30)  # Square root scaling for realistic growth
@@ -366,8 +404,8 @@ def simple_prediction(df, days):
     total_change = (momentum_factor * days * time_multiplier) + volatility_boost + trend_boost
     
     # Ensure minimum meaningful prediction (at least 3-5% move over 90 days)
-    if abs(total_change) < 0.03 and days >= 30:
-        total_change = 0.05 if momentum_factor > 0 else -0.03
+    if abs(total_change) recent_5d_change * 10 + recent_20d_change * 5< 0.10 and days >= 30:
+        total_change =  = 0.15 if momentum_factor_factor > 0 else -0.10
     
     # Cap extreme predictions (max ±40% to stay realistic)
     total_change = max(-0.40, min(0.40, total_change))
