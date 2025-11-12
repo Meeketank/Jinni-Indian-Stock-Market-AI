@@ -1,868 +1,648 @@
+# streamlit_app.py
 """
-JINNI - AI-Powered Indian Stock Market Analysis System (Streamlit)
-Enhanced version with proper error handling, improved UI, and real-time learning
+JINNI - AI-Powered Indian Stock Market Analysis (Streamlit)
+Updated: Universe auto-fetcher for NSE/BSE (tries to build full exchange lists and trains on them).
+Run: streamlit run streamlit_app.py
 """
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datetime import datetime, timedelta
-import warnings
-import threading
-import time
-import os
-import pickle
-import random
-from typing import List, Dict, Tuple
-import requests
-from bs4 import BeautifulSoup
+import warnings, threading, time, os, pickle, random, requests, io
+from typing import List, Tuple, Dict
 
 warnings.filterwarnings("ignore")
 
-# Optional analytics modules (wrap imports so missing modules don't break the UI)
-try:
-    from analytics.trading_signals import TradingSignals
-except Exception:
-    TradingSignals = None
+# -----------------------
+# Config
+# -----------------------
+MODEL_PATH = "jinni_bg_full_universe.pkl"
+UNIVERSE_REFRESH_INTERVAL = 24 * 3600  # refresh ticker list once a day
+DEFAULT_FALLBACK_TICKERS = [
+    "RELIANCE.NS","TCS.NS","INFY.NS","HDFCBANK.NS","ICICIBANK.NS","HINDUNILVR.NS","BHARTIARTL.NS",
+    "KOTAKBANK.NS","LT.NS","SBIN.NS","AXISBANK.NS","ITC.NS","MARUTI.NS","ONGC.NS","BAJFINANCE.NS"
+]
 
-try:
-    from analytics.stock_recommender import StockRecommender
-except Exception:
-    StockRecommender = None
+# -----------------------
+# Helper: fetch exchange tickers
+# -----------------------
+def fetch_nse_list() -> List[str]:
+    """
+    Attempt to fetch official NSE list (EQUITY_L.csv) from NSE archives.
+    Returns list of NSE symbols without suffix (we will append .NS later).
+    """
+    urls = [
+        # Common archive path; frequently available (may require headers)
+        "https://archives.nseindia.com/content/equities/EQUITY_L.csv",
+        # Another mirror used in some setups
+        "https://www1.nseindia.com/content/equities/EQUITY_L.csv",
+    ]
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; JINNIBot/1.0; +https://example.com)",
+        "Accept": "text/csv, */*; q=0.01",
+        "Referer": "https://www.nseindia.com"
+    }
+    for url in urls:
+        try:
+            resp = requests.get(url, headers=headers, timeout=10)
+            if resp.status_code == 200 and resp.text.strip():
+                df = pd.read_csv(io.StringIO(resp.text))
+                # often column 'SYMBOL' contains tickers
+                if 'SYMBOL' in df.columns:
+                    syms = df['SYMBOL'].astype(str).str.strip().tolist()
+                    return [s for s in syms if s and not s.startswith(" ")]
+                # fallback try first column
+                first_col = df.columns[0]
+                syms = df[first_col].astype(str).str.strip().tolist()
+                return syms
+        except Exception:
+            continue
+    return []
 
-# --- Enhanced BackgroundLearner Implementation ---
-class OnlineLinearModel:
+def fetch_github_nse_list() -> List[str]:
     """
-    Online linear regressor that predicts next-day return from last N lag returns.
-    Uses SGD updates and persists weights to disk.
+    Fallback: try to retrieve lists published on public GitHub repos (raw csv)
+    Note: reliability depends on external repo availability.
     """
-    def __init__(self, n_features=5, lr=0.001):
-        self.n = n_features
-        self.lr = lr
-        self.w = np.zeros(self.n)  # weights
+    candidates = [
+        "https://raw.githubusercontent.com/neerajkumarorg/indian-stock-data/master/nse-listed.csv",
+        "https://raw.githubusercontent.com/datasets/india-nifty50/master/data/nifty50.csv",
+        "https://raw.githubusercontent.com/ozlerhakan/mongodb-json-files/master/datasets/nse-stock-symbols.csv",
+    ]
+    for url in candidates:
+        try:
+            resp = requests.get(url, timeout=10)
+            if resp.status_code == 200 and resp.text.strip():
+                try:
+                    df = pd.read_csv(io.StringIO(resp.text))
+                    # try common columns
+                    for col in ['symbol','Symbol','SYMBOL','code','Code']:
+                        if col in df.columns:
+                            syms = df[col].astype(str).str.strip().tolist()
+                            return syms
+                    # if single-column CSV
+                    if df.shape[1] == 1:
+                        syms = df.iloc[:,0].astype(str).str.strip().tolist()
+                        return syms
+                except Exception:
+                    # fallback: parse raw lines
+                    lines = [l.strip() for l in resp.text.splitlines() if l.strip()]
+                    # ignore header if contains alphabetic
+                    if len(lines) > 2:
+                        # try splitting first line to detect separator
+                        return [l.split(",")[0].strip() for l in lines[1:]]
+        except Exception:
+            continue
+    return []
+
+def fetch_bse_list() -> List[str]:
+    """
+    Attempt to fetch BSE ticker list. BSE has no simple static CSV endpoint for crawling;
+    try known mirrors / GitHub fallbacks for BSE symbol lists.
+    """
+    candidates = [
+        "https://raw.githubusercontent.com/varunpant/indian-stock-list/master/bse.csv",
+        "https://raw.githubusercontent.com/datasets/india-nifty50/master/data/bse500.csv",
+        "https://raw.githubusercontent.com/shubh26/indian-stock-list/master/BSE-Symbols.csv",
+    ]
+    for url in candidates:
+        try:
+            resp = requests.get(url, timeout=10)
+            if resp.status_code == 200 and resp.text.strip():
+                try:
+                    df = pd.read_csv(io.StringIO(resp.text))
+                    for col in ['Symbol','SYMBOL','CODE','code','symbol']:
+                        if col in df.columns:
+                            syms = df[col].astype(str).str.strip().tolist()
+                            return syms
+                    if df.shape[1] == 1:
+                        return df.iloc[:,0].astype(str).str.strip().tolist()
+                except Exception:
+                    lines = [l.strip() for l in resp.text.splitlines() if l.strip()]
+                    if len(lines) > 2:
+                        return [l.split(",")[0].strip() for l in lines[1:]]
+        except Exception:
+            continue
+    return []
+
+def fetch_all_exchange_tickers(force_refresh: bool = False) -> List[str]:
+    """
+    Build the universe by trying multiple sources for NSE & BSE.
+    Caches the universe in 'tickers_cache.pkl' with timestamp to avoid repeated downloads.
+    Returns list of yfinance-ready tickers (with .NS or .BO).
+    """
+    cache_file = "tickers_cache.pkl"
+    now = time.time()
+    # load cache
+    try:
+        if os.path.exists(cache_file) and not force_refresh:
+            with open(cache_file, "rb") as f:
+                cache = pickle.load(f)
+            ts = cache.get("ts", 0)
+            if now - ts < UNIVERSE_REFRESH_INTERVAL:
+                return cache.get("tickers", DEFAULT_FALLBACK_TICKERS.copy())
+    except Exception:
+        pass
+
+    # Attempt NSE official list
+    nse = []
+    try:
+        nse = fetch_nse_list()
+        if not nse:
+            nse = fetch_github_nse_list()
+    except Exception:
+        nse = []
+
+    # Attempt BSE list
+    bse = []
+    try:
+        bse = fetch_bse_list()
+    except Exception:
+        bse = []
+
+    # normalize: remove non-alphanumeric entries & duplicates
+    def clean_list(lst):
+        cleaned = []
+        for s in lst:
+            if not isinstance(s, str):
+                continue
+            s2 = s.strip().upper()
+            s2 = s2.replace(" ", "")
+            if s2 and len(s2) <= 12:
+                cleaned.append(s2)
+        # remove obviously non-stock tokens
+        cleaned = [c for c in cleaned if not any(x in c for x in ["NIFTY","SENSEX","INDEX","ETF"])]
+        return list(dict.fromkeys(cleaned))
+
+    nse_clean = clean_list(nse)
+    bse_clean = clean_list(bse)
+
+    # build yfinance tickers: NSE -> .NS, BSE -> .BO
+    yf_nse = [s + ".NS" for s in nse_clean if s.isalpha() or any(ch.isalnum() for ch in s)]
+    yf_bse = [s + ".BO" for s in bse_clean if s.isalpha() or any(ch.isalnum() for ch in s)]
+
+    # merge, dedupe
+    universe = []
+    # include NSE first (most active) then BSE
+    for t in yf_nse + yf_bse:
+        if t not in universe:
+            universe.append(t)
+
+    # fallback: if universe too small, use default list
+    if not universe or len(universe) < 50:
+        universe = DEFAULT_FALLBACK_TICKERS.copy()
+
+    # save cache
+    try:
+        with open(cache_file, "wb") as f:
+            pickle.dump({"ts": now, "tickers": universe}, f)
+    except Exception:
+        pass
+
+    return universe
+
+# -----------------------
+# Small feature / model utilities (same as earlier)
+# -----------------------
+def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(period, min_periods=1).mean()
+    avg_loss = loss.rolling(period, min_periods=1).mean().replace(0, np.nan)
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.fillna(50)
+
+def compute_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    high_low = df['High'] - df['Low']
+    high_prev = np.abs(df['High'] - df['Close'].shift(1))
+    low_prev = np.abs(df['Low'] - df['Close'].shift(1))
+    tr = pd.concat([high_low, high_prev, low_prev], axis=1).max(axis=1)
+    atr = tr.rolling(period, min_periods=1).mean()
+    return atr.fillna(method='ffill').fillna(0.0)
+
+def build_features(df: pd.DataFrame, n_lags: int = 6):
+    if df is None or len(df) < n_lags + 8:
+        return np.empty((0, n_lags + 4)), np.empty((0,))
+    close = df['Close'].values
+    returns = (close[1:] - close[:-1]) / close[:-1]
+    ma20 = df['Close'].rolling(20, min_periods=1).mean().values
+    ma50 = df['Close'].rolling(50, min_periods=1).mean().values
+    rsi = compute_rsi(df['Close']).values
+    atr = compute_atr(df).values
+    X, y = [], []
+    for i in range(n_lags, len(returns)):
+        lag = returns[i - n_lags: i]
+        idx = i + 1
+        price = close[idx] if idx < len(close) else close[-1]
+        ma_diff = (ma20[idx] - ma50[idx]) / (price if price != 0 else 1)
+        rsi_val = (rsi[idx] / 100.0) if idx < len(rsi) else 0.5
+        atr_norm = (atr[idx] / price) if price != 0 else 0.0
+        vol = float(np.std(returns[max(0, i - 20): i + 1])) if i >= 1 else 0.0
+        feat = np.concatenate([lag, [ma_diff, rsi_val, atr_norm, vol]])
+        X.append(feat)
+        y.append(returns[i])
+    return np.array(X), np.array(y)
+
+# -----------------------
+# Online learners (small)
+# -----------------------
+class OnlineRegressor:
+    def __init__(self, n_features: int, lr: float = 0.004, l2: float = 1e-4):
+        self.w = np.zeros(n_features, dtype=float)
         self.b = 0.0
-        self.initialized = False
-
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        if X.size == 0:
-            return np.array([])
+        self.lr = lr
+        self.l2 = l2
+    def predict(self, X):
+        if X.ndim == 1:
+            return float(X.dot(self.w) + self.b)
         return X.dot(self.w) + self.b
-
-    def partial_fit(self, X: np.ndarray, y: np.ndarray):
+    def partial_fit(self, X, y):
         if X.size == 0:
             return
         preds = self.predict(X)
         errs = preds - y
-        grad_w = (errs[:, None] * X).mean(axis=0)
+        grad_w = (errs[:, None] * X).mean(axis=0) + self.l2 * self.w
         grad_b = errs.mean()
         self.w -= self.lr * grad_w
         self.b -= self.lr * grad_b
-        self.initialized = True
+    def to_dict(self): return {"w_reg": self.w, "b_reg": self.b}
+    def from_dict(self, d): 
+        self.w = d.get("w_reg", self.w); self.b = d.get("b_reg", self.b)
 
-    def save(self, path):
-        with open(path, "wb") as f:
-            pickle.dump({"w": self.w, "b": self.b}, f)
+class OnlineClassifier:
+    def __init__(self, n_features: int, lr: float = 0.008, l2: float = 1e-4):
+        self.w = np.zeros(n_features, dtype=float)
+        self.b = 0.0
+        self.lr = lr
+        self.l2 = l2
+    def _sigmoid(self, x): return 1.0/(1.0+np.exp(-np.clip(x, -50, 50)))
+    def predict_proba(self, X):
+        z = X.dot(self.w) + self.b
+        return self._sigmoid(z)
+    def partial_fit(self, X, y):
+        if X.size == 0:
+            return
+        p = self.predict_proba(X)
+        errs = p - y
+        grad_w = (errs[:, None] * X).mean(axis=0) + self.l2 * self.w
+        grad_b = errs.mean()
+        self.w -= self.lr * grad_w
+        self.b -= self.lr * grad_b
+    def to_dict(self): return {"w_clf": self.w, "b_clf": self.b}
+    def from_dict(self, d): self.w = d.get("w_clf", self.w); self.b = d.get("b_clf", self.b)
 
-    def load(self, path):
-        if os.path.exists(path):
-            with open(path, "rb") as f:
-                data = pickle.load(f)
-                self.w = data.get("w", self.w)
-                self.b = data.get("b", self.b)
-                self.initialized = True
-
+# -----------------------
+# Background Learner (uses dynamic universe)
+# -----------------------
 class BackgroundLearner:
-    """
-    Background learning system that continuously learns from market data
-    """
-    def __init__(self, model_path="background_model.pkl", universe: List[str] = None, 
-                 n_lags: int = 5, interval_sec: int = 60):
+    def __init__(self,
+                 model_path: str = MODEL_PATH,
+                 n_lags: int = 6,
+                 interval_sec: int = 20,
+                 batch_size: int = 20):
         self.model_path = model_path
         self.n_lags = n_lags
-        self.interval_sec = max(10, interval_sec)
-        self.universe = universe or self._default_universe()
-        self.model = OnlineLinearModel(n_features=self.n_lags, lr=0.003)
-        self.model.load(self.model_path)
-        self.metrics = {
-            "directional_accuracy": 0.0,
-            "mae": float("inf"),
-            "total_samples": 0,
-            "history": []
-        }
-        self._stop_event = threading.Event()
+        self.interval_sec = max(5, interval_sec)
+        self.batch_size = max(1, batch_size)
+        self.universe = []  # will be populated by fetch_all_exchange_tickers
+        self.reg = OnlineRegressor(n_features=self.n_lags + 4, lr=0.004)
+        self.clf = OnlineClassifier(n_features=self.n_lags + 4, lr=0.008)
+        self.metrics = {"dir_acc_ema": 0.5, "mae_ema": 0.5, "samples": 0}
+        self.ema_alpha = 0.06
+        self._stop = threading.Event()
         self._thread = None
         self.lock = threading.Lock()
+        self._load()
+        # try to populate universe now
+        self.refresh_universe()
 
-    def _default_universe(self) -> List[str]:
-        """Return empty list - uses only user-provided stock"""
-        return []
+    def _load(self):
+        if os.path.exists(self.model_path):
+            try:
+                with open(self.model_path, "rb") as f:
+                    d = pickle.load(f)
+                self.reg.from_dict(d)
+                self.clf.from_dict(d)
+                if "metrics" in d:
+                    self.metrics.update(d["metrics"])
+            except Exception:
+                pass
+
+    def _save(self):
+        try:
+            with open(self.model_path, "wb") as f:
+                out = {}
+                out.update(self.reg.to_dict())
+                out.update(self.clf.to_dict())
+                out["metrics"] = self.metrics
+                pickle.dump(out, f)
+        except Exception:
+            pass
+
+    def refresh_universe(self, force: bool = False):
+        try:
+            tickers = fetch_all_exchange_tickers(force_refresh=force)
+            # small random shuffle for training variety
+            random.shuffle(tickers)
+            # limit to reasonable cap to protect rate-limits (if you want all, remove cap)
+            # We'll keep up to 1500 tickers for training by default (practical).
+            cap = 3000  # user can increase; keep large to include most exchange symbols
+            self.universe = tickers[:cap]
+        except Exception:
+            # fallback
+            self.universe = DEFAULT_FALLBACK_TICKERS.copy()
+
     def start(self):
         if self._thread and self._thread.is_alive():
             return
-        self._stop_event.clear()
-        self._thread = threading.Thread(target=self._learn_loop, daemon=True)
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
     def stop(self):
-        self._stop_event.set()
+        self._stop.set()
         if self._thread:
             self._thread.join(timeout=2)
 
-    def _fetch_history(self, ticker: str, days=90):
+    def _fetch_history(self, ticker: str, days: int = 400):
         try:
             t = yf.Ticker(ticker)
-            df = t.history(period=f"{days}d", interval="1d")
-            return df if not df.empty else None
+            df = t.history(period=f"{days}d", interval="1d", auto_adjust=False)
+            if df is None or df.empty:
+                return None
+            return df
         except Exception:
             return None
 
-    def _build_samples(self, df: pd.DataFrame):
-        if df is None or len(df) <= self.n_lags + 1:
-            return np.empty((0, self.n_lags)), np.empty((0,))
-        
-        close = df["Close"].values
-        returns = (close[1:] - close[:-1]) / close[:-1]
-        
-        X, y = [], []
-        for i in range(self.n_lags, len(returns)):
-            x = returns[i - self.n_lags : i]
-            target = returns[i]
-            X.append(x)
-            y.append(target)
-        
-        return np.array(X), np.array(y)
-
-    def _update_metrics(self, preds: np.ndarray, truths: np.ndarray):
-        if preds.size == 0:
-            return
-        
-        mae = np.mean(np.abs(preds - truths))
-        dir_correct = np.mean(np.sign(preds) == np.sign(truths))
-        
+    def _update_ema(self, batch_dir: float, batch_mae: float, n_new: int):
         with self.lock:
-            total_before = self.metrics["total_samples"]
-            prev_acc = self.metrics["directional_accuracy"]
-            prev_mae = self.metrics["mae"] if self.metrics["mae"] != float("inf") else 0.0
-            n_new = len(truths)
-            
-            if total_before == 0:
-                new_acc = dir_correct
-                new_mae = mae
-            else:
-                new_acc = (prev_acc * total_before + dir_correct * n_new) / (total_before + n_new)
-                new_mae = (prev_mae * total_before + mae * n_new) / (total_before + n_new)
-            
-            self.metrics["directional_accuracy"] = float(new_acc)
-            self.metrics["mae"] = float(new_mae)
-            self.metrics["total_samples"] = total_before + n_new
-            
-            self.metrics["history"].append({
-                "ts": time.time(),
-                "dir_acc": float(dir_correct),
-                "mae": float(mae),
-                "samples": n_new
-            })
-            
-            if len(self.metrics["history"]) > 500:
-                self.metrics["history"].pop(0)
+            a = self.ema_alpha
+            self.metrics["dir_acc_ema"] = a * batch_dir + (1 - a) * self.metrics["dir_acc_ema"]
+            self.metrics["mae_ema"] = a * batch_mae + (1 - a) * self.metrics["mae_ema"]
+            self.metrics["samples"] += n_new
 
-    def _learn_loop(self):
-        while not self._stop_event.is_set():
+    def _loop(self):
+        while not self._stop.is_set():
             try:
-                sample_count = min(4, max(1, len(self.universe)))
-                tickers = random.sample(self.universe, sample_count)
-                
-                for tk in tickers:
-                    if self._stop_event.is_set():
+                if not self.universe:
+                    time.sleep(self.interval_sec)
+                    continue
+                # pick random batch of tickers across universe
+                batch = random.sample(self.universe, min(self.batch_size, len(self.universe)))
+                dir_accs, maes, n_total = [], [], 0
+                for sym in batch:
+                    if self._stop.is_set():
                         break
-                    
-                    df = self._fetch_history(tk, days=120)
-                    X, y = self._build_samples(df)
-                    
+                    df = self._fetch_history(sym, days=400)
+                    if df is None or len(df) < self.n_lags + 8:
+                        continue
+                    X, y = build_features(df, n_lags=self.n_lags)
                     if X.size == 0:
                         continue
-                    
-                    preds = self.model.predict(X)
-                    self._update_metrics(preds, y)
-                    self.model.partial_fit(X, y)
-                    
-                    if random.random() < 0.2:
-                        try:
-                            self.model.save(self.model_path)
-                        except Exception:
-                            pass
-                    
-                    time.sleep(0.5)
-                
+                    preds = self.reg.predict(X)
+                    mae = float(np.mean(np.abs(preds - y)))
+                    dir_acc = float(np.mean(np.sign(preds) == np.sign(y)))
+                    # train classifier and regressor online
+                    self.clf.partial_fit(X, (y > 0).astype(int))
+                    self.reg.partial_fit(X, y)
+                    dir_accs.append(dir_acc)
+                    maes.append(mae)
+                    n_total += len(y)
+                    time.sleep(0.06)  # small pause to reduce burst
+                if n_total > 0:
+                    batch_dir = float(np.mean(dir_accs)) if dir_accs else 0.5
+                    batch_mae = float(np.mean(maes)) if maes else 0.5
+                    self._update_ema(batch_dir, batch_mae, n_total)
+                    # occasionally persist
+                    if random.random() < 0.25:
+                        self._save()
+                # occasionally refresh universe (daily)
+                if random.random() < 0.02:
+                    self.refresh_universe()
                 time.sleep(self.interval_sec)
             except Exception:
                 time.sleep(self.interval_sec)
 
-    def get_performance_report(self):
+    def get_performance_report(self) -> Dict:
         with self.lock:
             return {
-                "directional_accuracy": self.metrics["directional_accuracy"],
-                "mae": self.metrics["mae"],
-                "total_samples": self.metrics["total_samples"],
-                "history": list(self.metrics["history"])
+                "directional_accuracy": float(self.metrics["dir_acc_ema"]),
+                "mae": float(self.metrics["mae_ema"]),
+                "total_samples": int(self.metrics["samples"])
             }
 
-    def predict_for_ticker(self, ticker: str, n_lags: int = None):
-        n_lags = n_lags or self.n_lags
-        df = self._fetch_history(ticker, days=90)
-        
-        if df is None or len(df) <= n_lags:
+    def predict_for_ticker(self, ticker: str) -> Tuple[float, float]:
+        df = self._fetch_history(ticker, days=300)
+        if df is None or len(df) < self.n_lags + 5:
             return 0.0, 0.0
-        
-        close = df["Close"].values
-        returns = (close[1:] - close[:-1]) / close[:-1]
-        latest = returns[-n_lags:]
-        
-        if len(latest) < n_lags:
-            latest = np.concatenate([np.zeros(n_lags - len(latest)), latest])
-        
-        pred = float(self.model.predict(latest.reshape(1, -1))[0])
-        vol = np.std(returns[-20:]) if len(returns) >= 20 else np.std(returns)
-        confidence = max(0.0, min(0.99, 1.0 - vol * 5))
-        
-        return pred, confidence
+        X, _ = build_features(df, n_lags=self.n_lags)
+        if X.size == 0:
+            return 0.0, 0.0
+        latest = X[-1].reshape(1, -1)
+        pred_daily = float(self.reg.predict(latest)[0])
+        prob_up = float(self.clf.predict_proba(latest)[0])
+        recent_returns = (df['Close'].values[1:] - df['Close'].values[:-1]) / df['Close'].values[:-1]
+        vol = float(np.std(recent_returns[-60:])) if len(recent_returns) >= 1 else 0.0
+        confidence = float(max(0.0, min(0.99, prob_up * (1.0 - min(0.85, vol * 4.0)))))
+        # signed daily return biased by classifier
+        signed = pred_daily * (prob_up * 2 - 1)
+        signed = float(np.clip(signed, -0.8, 0.8))
+        return signed, confidence
 
     def get_high_return_recommendations(self, min_return: float = 10.0, days: int = 7) -> List[Dict]:
-        recommendations = []
-        
-        for symbol in self.universe[:30]:  # Check first 30 for speed
+        recs = []
+        if not self.universe:
+            return recs
+        # sample subset for speed but cover randomly across full universe
+        sample_universe = random.sample(self.universe, min(400, len(self.universe)))
+        for sym in sample_universe:
             try:
-                df = self._fetch_history(symbol, days=100)
-                if df is None or len(df) < 60:
+                daily, conf = self.predict_for_ticker(sym)
+                expected_pct = daily * np.sqrt(max(1, days)) * 100
+                if abs(expected_pct) < abs(min_return):
                     continue
-                
-                predicted_price, confidence = self.predict_for_ticker(symbol)
-                current_price = df['Close'].iloc[-1]
-                predicted_return = ((predicted_price - current_price) / current_price) * 100
-                
-                if abs(predicted_return) >= min_return and confidence > 60:
-                    signal = "BUY" if predicted_return > 0 else "SELL"
-                    recommendations.append({
-                        'symbol': symbol,
-                        'current_price': current_price,
-                        'target_price': predicted_price,
-                        'predicted_return': predicted_return,
-                        'confidence': confidence,
-                        'signal': signal
-                    })
-                    
+                if conf < 0.12:
+                    continue
+                df = self._fetch_history(sym, days=100)
+                if df is None or df.empty:
+                    continue
+                cp = float(df['Close'].iloc[-1])
+                tp = cp * (1 + daily * np.sqrt(max(1, days)))
+                recs.append({
+                    "symbol": sym,
+                    "current_price": cp,
+                    "target_price": tp,
+                    "predicted_return_pct": expected_pct,
+                    "confidence": conf,
+                    "signal": "BUY" if expected_pct > 0 else "SELL"
+                })
             except Exception:
                 continue
-        
-        recommendations.sort(key=lambda x: abs(x['predicted_return']), reverse=True)
-        return recommendations[:10]
+        recs.sort(key=lambda x: abs(x['predicted_return_pct']), reverse=True)
+        return recs[:12]
 
-# Instantiate global background learner
-BG_LEARNER = BackgroundLearner(interval_sec=30)
-BG_LEARNER.start()
+    def is_running(self):
+        return bool(self._thread and self._thread.is_alive())
 
-# --- Streamlit App Configuration ---
-st.set_page_config(
-    page_title="JINNI - Indian Stock Market AI",
-    page_icon="🧞",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+    def add_to_universe(self, list_of_symbols: List[str]):
+        for s in list_of_symbols:
+            if s not in self.universe:
+                self.universe.append(s)
 
-# Enhanced CSS
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 3.5rem;
-        font-weight: 800;
-        text-align: center;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        margin-bottom: 0.5rem;
-        text-shadow: 2px 2px 4px rgba(0,0,0,0.1);
-    }
-    .sub-header {
-        font-size: 1.3rem;
-        text-align: center;
-        color: #666;
-        margin-bottom: 2rem;
-        font-weight: 300;
-    }
-    .metric-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 1.5rem;
-        border-radius: 15px;
-        color: white;
-        text-align: center;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.1);
-        margin: 0.5rem;
-    }
-    .prediction-box {
-        background: #ffffff;
-        padding: 1.5rem;
-        border-radius: 15px;
-        border-left: 5px solid #1E88E5;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.1);
-        margin: 1rem 0;
-    }
-    .buy-signal { 
-        border-left-color: #28a745 !important; 
-        background: #d4edda !important; 
-    }
-    .sell-signal { 
-        border-left-color: #dc3545 !important; 
-        background: #f8d7da !important; 
-    }
-    .hold-signal { 
-        border-left-color: #ffc107 !important; 
-        background: #fff3cd !important; 
-    }
-    .stock-card {
-        background: white;
-        padding: 1rem;
-        border-radius: 10px;
-        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        margin: 0.5rem 0;
-        border-left: 4px solid #667eea;
-    }
-    .section-header {
-        font-size: 1.5rem;
-        font-weight: 600;
-        color: #333;
-        margin: 1.5rem 0 1rem 0;
-        padding-bottom: 0.5rem;
-        border-bottom: 2px solid #667eea;
-    }
-</style>
-""", unsafe_allow_html=True)
+    def get_universe_sample(self, n=20):
+        return random.sample(self.universe, min(n, len(self.universe)))
 
-# Header
-st.markdown('<div class="main-header">🧞 JINNI AI STOCK ANALYSIS</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">Advanced Real-time Indian Stock Market Analysis & Prediction System</div>', unsafe_allow_html=True)
+# -----------------------
+# Instantiate learner and start
+# -----------------------
+BG = BackgroundLearner(model_path=MODEL_PATH, n_lags=6, interval_sec=18, batch_size=25)
+BG.start()
 
-# Sidebar
+# -----------------------
+# Streamlit UI (light)
+# -----------------------
+st.set_page_config(page_title="JINNI - AI Stock Analysis (Full Exchange Universe)", page_icon="🧞", layout="wide")
+st.markdown("<h1 style='text-align:center'>🧞 JINNI — AI Stock Analysis (NSE + BSE Universe)</h1>", unsafe_allow_html=True)
+st.markdown("<p style='text-align:center;color:#666'>Learner trains across the full exchange tickers (fetched automatically). Refreshes daily.</p>", unsafe_allow_html=True)
+
 with st.sidebar:
-    st.image("https://raw.githubusercontent.com/microsoft/fluentui-emoji/main/assets/Genie/3D/genie_3d.png", width=120)
-    st.title("🎯 Analysis Controls")
-    
-    # Stock selection
-    stock_symbol = st.text_input("📈 Stock Symbol", value="RELIANCE.NS", 
-                               help="Enter NSE stock symbol (e.g., RELIANCE.NS, TCS.NS)")
-    
-    # Analysis timeframe
-    timeframe = st.selectbox("📅 Timeframe", 
-                           ["1 Week", "1 Month", "3 Months", "6 Months", "1 Year", "2 Years", "5 Years"])
-    
-    # Prediction horizon
-    pred_days = st.slider("🎯 Prediction Horizon (Days)", 1, 90, 7)
-    
-    # Analysis type
-    analysis_type = st.multiselect(
-        "🔍 Analysis Types",
-        ["Technical", "Fundamental", "Risk", "Momentum"],
-        default=["Technical", "Fundamental"]
-    )
-    
-    # Action buttons
-    col1, col2 = st.columns(2)
-    with col1:
-        analyze_btn = st.button("🚀 Analyze", use_container_width=True, type="primary")
-    with col2:
-        scan_btn = st.button("🔍 Scan Stocks", use_container_width=True)
-    
+    st.header("Controls")
+    symbol = st.text_input("Stock (NSE/BSE)", value="RELIANCE.NS", help="Enter ticker with .NS or .BO (or plain symbol)")
+    pred_days = st.slider("Prediction horizon (days)", 1, 90, 7)
+    if st.button("Refresh universe now"):
+        with st.spinner("Refreshing universe..."):
+            BG.refresh_universe(force=True)
+        st.success("Universe refreshed (may take a moment).")
+    if st.button("Show sample universe"):
+        sample = BG.get_universe_sample(30)
+        st.write(sample)
     st.divider()
-    
-    # Model performance
-    st.subheader("🧠 AI Model Performance")
-    perf = BG_LEARNER.get_performance_report()
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("Accuracy", f"{perf['directional_accuracy']*100:.1f}%")
-        st.metric("Samples", f"{perf['total_samples']:,}")
-    with col2:
-        st.metric("MAE", f"{perf['mae']:.4f}")
-        st.metric("Stocks", f"{len(BG_LEARNER.universe)}")
-    
-    st.divider()
-    
-    # Quick recommendations
-    st.subheader("💎 Weekly High-Potential")
-    if st.button("Find 10%+ Opportunities"):
-        with st.spinner("Scanning for high-return stocks..."):
-            recommendations = BG_LEARNER.get_high_return_recommendations(min_return=10, days=7)
-            if recommendations:
-                for i, rec in enumerate(recommendations[:3], 1):
-                    with st.expander(f"{i}. {rec['symbol']} - Est: {rec['predicted_return']:.1f}%"):
-                        st.write(f"**Current:** ₹{rec['current_price']:.2f}")
-                        st.write(f"**Target:** ₹{rec['target_price']:.2f}")
-                        st.write(f"**Confidence:** {rec['confidence']:.1f}%")
-                        st.write(f"**Signal:** {rec['signal']}")
-            else:
-                st.info("No high-confidence opportunities found")
+    perf = BG.get_performance_report()
+    st.subheader("Learner metrics (EMA)")
+    st.metric("Directional Acc (EMA)", f"{perf['directional_accuracy']*100:.2f}%")
+    st.metric("MAE (EMA)", f"{perf['mae']:.4f}")
+    st.metric("Trained samples", f"{perf['total_samples']:,}")
 
-# Helper functions
+# small caching wrapper for fetch
 @st.cache_data(ttl=300)
-def fetch_stock_data(symbol: str, period: str) -> Tuple[pd.DataFrame, Dict, yf.Ticker]:
-    """Fetch stock data with enhanced error handling"""
+def fetch_hist(symbol: str, period: str = "6mo"):
     try:
-        ticker = yf.Ticker(symbol)
-        hist = ticker.history(period=period, auto_adjust=True)
-        
-        if hist.empty:
-            return None, {}, None
-            
-        info = ticker.info
-        return hist, info, ticker
-        
-    except Exception as e:
-        st.error(f"Error fetching data: {str(e)}")
-        return None, {}, None
+        t = yf.Ticker(symbol)
+        hist = t.history(period=period, auto_adjust=True)
+        info = {}
+        try:
+            info = t.info or {}
+        except Exception:
+            info = {}
+        if hist is None or hist.empty:
+            return None, {}
+        return hist, info
+    except Exception:
+        return None, {}
 
-def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculate comprehensive technical indicators"""
-    if df is None or df.empty:
-        return df
-        
+def add_tech(df):
     df = df.copy()
-    
-    # Moving averages
-    for period in [5, 10, 20, 50, 100, 200]:
-        df[f'MA{period}'] = df['Close'].rolling(window=period, min_periods=1).mean()
-    
-    # RSI
-    delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=1).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=1).mean()
-    rs = gain / loss
-    df['RSI'] = 100 - (100 / (1 + rs))
-    df['RSI'].fillna(50, inplace=True)
-    
-    # MACD
-    exp1 = df['Close'].ewm(span=12, adjust=False).mean()
-    exp2 = df['Close'].ewm(span=26, adjust=False).mean()
-    df['MACD'] = exp1 - exp2
-    df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-    df['MACD_Histogram'] = df['MACD'] - df['MACD_Signal']
-    
-    # Bollinger Bands
-    df['BB_Middle'] = df['Close'].rolling(20, min_periods=1).mean()
-    bb_std = df['Close'].rolling(20, min_periods=1).std().fillna(0)
-    df['BB_Upper'] = df['BB_Middle'] + (bb_std * 2)
-    df['BB_Lower'] = df['BB_Middle'] - (bb_std * 2)
-    df['BB_Width'] = (df['BB_Upper'] - df['BB_Lower']) / df['BB_Middle']
-    
-    # Volume indicators
-    df['Volume_MA'] = df['Volume'].rolling(20, min_periods=1).mean()
-    df['Volume_Ratio'] = df['Volume'] / df['Volume_MA']
-    
-    # Volatility
-    df['Volatility'] = df['Close'].pct_change().rolling(20, min_periods=1).std() * np.sqrt(252) * 100
-    
+    for p in [5,10,20,50,100,200]:
+        df[f"MA{p}"] = df["Close"].rolling(p, min_periods=1).mean()
+    df["RSI"] = compute_rsi(df["Close"])
+    exp1 = df["Close"].ewm(span=12, adjust=False).mean()
+    exp2 = df["Close"].ewm(span=26, adjust=False).mean()
+    df["MACD"] = exp1 - exp2
+    df["MACD_Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
+    df["Volatility"] = df["Close"].pct_change().rolling(20, min_periods=1).std() * np.sqrt(252) * 100
     return df
 
-def create_enhanced_chart(df: pd.DataFrame, symbol: str) -> go.Figure:
-    """Create comprehensive stock chart"""
-    fig = make_subplots(
-        rows=3, cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.05,
-        subplot_titles=('Price with Indicators', 'Volume', 'RSI & MACD'),
-        row_heights=[0.5, 0.2, 0.3]
-    )
-    
-    # Price chart
-    fig.add_trace(go.Candlestick(
-        x=df.index, open=df['Open'], high=df['High'], 
-        low=df['Low'], close=df['Close'], name='Price'
-    ), row=1, col=1)
-    
-    # Moving averages
-    for ma in ['MA20', 'MA50']:
-        if ma in df.columns:
-            fig.add_trace(go.Scatter(
-                x=df.index, y=df[ma], name=ma, line=dict(width=2)
-            ), row=1, col=1)
-    
-    # Volume
-    colors = ['red' if row['Open'] > row['Close'] else 'green' 
-             for _, row in df.iterrows()]
-    fig.add_trace(go.Bar(
-        x=df.index, y=df['Volume'], name='Volume',
-        marker_color=colors, opacity=0.7
-    ), row=2, col=1)
-    
-    # RSI
+def chart(df, symbol):
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.06, row_heights=[0.6,0.2,0.2])
+    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='price'), row=1, col=1)
+    if 'MA20' in df.columns: fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], name='MA20'), row=1, col=1)
+    fig.add_trace(go.Bar(x=df.index, y=df['Volume'], name='vol'), row=2, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], name='RSI'), row=3, col=1)
-    fig.add_hline(y=70, line_dash="dash", line_color="red", row=3, col=1)
-    fig.add_hline(y=30, line_dash="dash", line_color="green", row=3, col=1)
-    fig.add_hline(y=50, line_dash="dot", line_color="grey", row=3, col=1)
-    
-    # MACD
-    fig.add_trace(go.Scatter(x=df.index, y=df['MACD'], name='MACD'), row=3, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['MACD_Signal'], name='Signal'), row=3, col=1)
-    
-    fig.update_layout(
-        title=f'{symbol} - Technical Analysis',
-        height=800,
-        showlegend=True,
-        xaxis_rangeslider_visible=False
-    )
-    
+    fig.update_layout(height=760, showlegend=True)
     return fig
 
-def compute_targets_from_prediction(current_price: float, pred_return: float, days: int):
-    """Compute realistic trading targets"""
-    entry = current_price
-    
-    # Dynamic stop loss based on volatility and time horizon
-    base_sl = 0.03  # 3% base stop loss
-    stop_loss = entry * (1 - base_sl) if pred_return >= 0 else entry * (1 + base_sl)
-    
-    # Scale targets based on prediction confidence and time horizon
-    time_factor = np.sqrt(days / 7)  # Scale with square root of time
-    
-    targets = []
-    for multiplier in [0.3, 0.6, 0.9, 1.2]:
-        target_price = entry + (pred_return * entry * multiplier * time_factor)
-        targets.append(max(0.01, target_price))
-    
-    # Risk-reward ratio
-    risk = abs(entry - stop_loss)
-    reward = abs(targets[1] - entry) if len(targets) > 1 else 0
-    rr = (reward / risk) if risk > 0 else 0
-    
-    return entry, stop_loss, targets, rr
+# Main analysis
+if symbol:
+    # normalize input
+    s = symbol.strip().upper()
+    if not s.endswith(".NS") and not s.endswith(".BO"):
+        # try both NSE and BSE if user didn't specify; prefer NSE
+        try_symbols = [s + ".NS", s + ".BO", s]
+    else:
+        try_symbols = [s]
+    hist, info = None, {}
+    for ts in try_symbols:
+        hist, info = fetch_hist(ts, period="1y")
+        if hist is not None:
+            symbol = ts
+            break
+    if hist is None:
+        st.error("No data found for the symbol you entered. Try adding .NS or .BO or check ticker.")
+    else:
+        df = add_tech(hist)
+        st.subheader(f"{info.get('longName', symbol)} — {symbol}")
+        price = float(df['Close'].iloc[-1])
+        prev = float(df['Close'].iloc[-2]) if len(df)>1 else price
+        st.metric("Price", f"₹{price:.2f}", f"{(price-prev):+.2f} ({(price-prev)/prev*100:+.2f}%)")
+        st.plotly_chart(chart(df, symbol), use_container_width=True)
 
-def enhanced_prediction(df: pd.DataFrame, days: int) -> float:
-    """Enhanced prediction with multiple factors"""
-    if df is None or df.empty:
-        return 0.0
-    
-    current_price = df["Close"].iloc[-1]
-    
-    # Multiple timeframe analysis
-    recent_5d = df["Close"].pct_change().tail(5).mean()
-    recent_20d = df["Close"].pct_change().tail(20).mean()
-    recent_60d = df["Close"].pct_change().tail(60).mean()
-    
-    # Weighted momentum
-    momentum = (recent_5d * 0.5 + recent_20d * 0.3 + recent_60d * 0.2)
-    
-    # Technical confirmation
-    rsi = df['RSI'].iloc[-1] if 'RSI' in df.columns else 50
-    rsi_factor = 1.0
-    if rsi < 30:  # Oversold
-        rsi_factor = 1.2
-    elif rsi > 70:  # Overbought
-        rsi_factor = 0.8
-    
-    # Volume confirmation
-    volume_trend = df['Volume_Ratio'].iloc[-1] if 'Volume_Ratio' in df.columns else 1.0
-    volume_factor = min(2.0, max(0.5, volume_trend))
-    
-    # Time scaling
-    time_multiplier = np.sqrt(days / 30)
-    
-    # Combine factors
-    total_change = momentum * days * time_multiplier * rsi_factor * volume_factor
-    
-    # Realistic bounds
-    total_change = max(-0.40, min(0.40, total_change))
-    
-    return current_price * (1 + total_change)
+        # prediction from BG learner
+        bg_daily, bg_conf = BG.predict_for_ticker(symbol)
+        # scale to horizon conservatively
+        pred_price_bg = price * (1 + bg_daily * np.sqrt(max(1, pred_days)))
+        # heuristic fallback (short momentum)
+        heuristic_price = price * (1 + (df['Close'].pct_change().tail(5).mean() or 0) * np.sqrt(max(1, pred_days/7)))
+        final_price = pred_price_bg * bg_conf + heuristic_price * (1 - bg_conf) if bg_conf>0 else heuristic_price
+        pred_pct = (final_price - price)/price*100
 
-# Main analysis function
-def run_comprehensive_analysis():
-    """Run comprehensive stock analysis"""
-    timeframe_map = {
-        "1 Week": "5d", "1 Month": "1mo", "3 Months": "3mo",
-        "6 Months": "6mo", "1 Year": "1y", "2 Years": "2y", "5 Years": "5y"
-    }
-    
-    period = timeframe_map.get(timeframe, "6mo")
-    
-    # Fetch data
-    with st.spinner("🔄 Fetching market data..."):
-        hist, info, ticker = fetch_stock_data(stock_symbol, period)
-        
-    if hist is None or hist.empty:
-        st.error("❌ Could not fetch stock data. Please check the symbol and try again.")
-        return
-    
-    # Calculate indicators
-    hist = calculate_technical_indicators(hist)
-    company_name = info.get('longName', info.get('shortName', stock_symbol))
-    
-    # Company overview
-    st.header(f"🏢 {company_name}")
-    
-    # Key metrics
-    col1, col2, col3, col4, col5 = st.columns(5)
-    
-    with col1:
-        current_price = hist['Close'].iloc[-1]
-        prev_close = hist['Close'].iloc[-2] if len(hist) > 1 else current_price
-        change = current_price - prev_close
-        change_pct = (change / prev_close) * 100
-        st.metric("Current Price", f"₹{current_price:.2f}", 
-                 f"{change:+.2f} ({change_pct:+.2f}%)")
-    
-    with col2:
-        day_high = hist['High'].iloc[-1]
-        st.metric("Day High", f"₹{day_high:.2f}")
-    
-    with col3:
-        day_low = hist['Low'].iloc[-1]
-        st.metric("Day Low", f"₹{day_low:.2f}")
-    
-    with col4:
-        volume = hist['Volume'].iloc[-1]
-        st.metric("Volume", f"{volume:,.0f}")
-    
-    with col5:
-        market_cap = info.get('marketCap')
-        if market_cap:
-            st.metric("Market Cap", f"₹{market_cap/1e7:.0f} Cr")
+        # display
+        if pred_pct >= 15:
+            css = "buy-signal"; rec = "STRONG BUY"
+        elif pred_pct >= 5:
+            css = "buy-signal"; rec = "BUY"
+        elif pred_pct <= -15:
+            css = "sell-signal"; rec = "STRONG SELL"
+        elif pred_pct <= -5:
+            css = "sell-signal"; rec = "SELL"
         else:
-            st.metric("Volatility", f"{hist['Volatility'].iloc[-1]:.1f}%")
-    
-    # Technical chart
-    st.plotly_chart(create_enhanced_chart(hist, stock_symbol), use_container_width=True)
-    
-    # AI Prediction Section
-    st.header("🤖 AI Prediction & Recommendations")
-    
-    # Get predictions from both models
-    with st.spinner("🧠 Generating AI predictions..."):
-        bg_pred_return, bg_conf = BG_LEARNER.predict_for_ticker(stock_symbol)
-        enhanced_pred_price = enhanced_prediction(hist, pred_days)
-        
-        # Combine predictions
-        if bg_conf > 0.3:
-            # Weighted combination based on confidence
-            final_pred_price = (bg_pred_return * bg_conf + enhanced_pred_price * (1 - bg_conf))
-        else:
-            final_pred_price = enhanced_pred_price
-        
-        current_price = hist['Close'].iloc[-1]
-        pred_change = ((final_pred_price - current_price) / current_price) * 100
-    
-    # Display predictions
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        # Determine signal and styling
-        if pred_change >= 15:
-            signal, signal_class = "🔵 STRONG BUY", "buy-signal"
-        elif pred_change >= 5:
-            signal, signal_class = "🟢 BUY", "buy-signal"
-        elif pred_change <= -15:
-            signal, signal_class = "🔴 STRONG SELL", "sell-signal"
-        elif pred_change <= -5:
-            signal, signal_class = "🔴 SELL", "sell-signal"
-        else:
-            signal, signal_class = "⚪ HOLD", "hold-signal"
-        
-        st.markdown(f"""
-        <div class="prediction-box {signal_class}">
-            <h3>🎯 AI Recommendation: {signal}</h3>
-            <h2>₹{final_pred_price:.2f}</h2>
-            <p style="font-size:16px; color:{'green' if pred_change > 0 else 'red'}">
-                {pred_change:+.2f}% in {pred_days} days
-            </p>
-            <p style="font-size:14px;">Model Confidence: {max(bg_conf * 100, 60):.1f}%</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col2:
-        # Trading plan
-        entry, stop_loss, targets, rr = compute_targets_from_prediction(current_price, pred_change/100, pred_days)
-        
-        st.markdown("""
-        <div class="prediction-box">
-            <h3>💰 Trading Plan</h3>
-        """, unsafe_allow_html=True)
-        
-        st.write(f"**Entry Price:** ₹{entry:.2f}")
-        st.write(f"**Stop Loss:** ₹{stop_loss:.2f}")
-        st.write("---")
-        st.write("**Profit Targets:**")
-        for i, target in enumerate(targets[:4], 1):
-            target_return = ((target - entry) / entry) * 100
-            st.write(f"Target {i}: ₹{target:.2f} ({target_return:+.1f}%)")
-        
-        st.write(f"**Risk-Reward:** 1:{rr:.2f}")
+            css = "hold-signal"; rec = "HOLD"
+
+        st.markdown(f"<div class='prediction-box {css}'>", unsafe_allow_html=True)
+        st.markdown(f"### {rec}")
+        st.markdown(f"<h2>₹{final_price:.2f}</h2>", unsafe_allow_html=True)
+        st.markdown(f"<p>{pred_pct:+.2f}% in {pred_days} days — model conf {bg_conf:.2f}</p>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
-    
-    # Technical Analysis
-    if "Technical" in analysis_type:
-        st.header("📈 Technical Analysis")
-        
-        tech_col1, tech_col2, tech_col3, tech_col4 = st.columns(4)
-        
-        with tech_col1:
-            rsi = hist['RSI'].iloc[-1]
-            rsi_status = "Overbought" if rsi > 70 else "Oversold" if rsi < 30 else "Neutral"
-            st.metric("RSI (14)", f"{rsi:.1f}", rsi_status)
-        
-        with tech_col2:
-            macd = hist['MACD'].iloc[-1]
-            macd_signal = hist['MACD_Signal'].iloc[-1]
-            macd_trend = "Bullish" if macd > macd_signal else "Bearish"
-            st.metric("MACD", f"{macd:.3f}", macd_trend)
-        
-        with tech_col3:
-            ma_trend = "Bullish" if hist['Close'].iloc[-1] > hist['MA50'].iloc[-1] else "Bearish"
-            st.metric("Trend (MA50)", ma_trend)
-        
-        with tech_col4:
-            volatility = hist['Volatility'].iloc[-1]
-            vol_level = "High" if volatility > 40 else "Medium" if volatility > 20 else "Low"
-            st.metric("Volatility", f"{volatility:.1f}%", vol_level)
-    
-    # Fundamental Analysis
-    if "Fundamental" in analysis_type:
-        st.header("📊 Fundamental Analysis")
-        
-        fund_col1, fund_col2, fund_col3 = st.columns(3)
-        
-        with fund_col1:
-            pe_ratio = info.get('trailingPE')
-            if pe_ratio:
-                pe_status = "Low" if pe_ratio < 15 else "High" if pe_ratio > 25 else "Reasonable"
-                st.metric("P/E Ratio", f"{pe_ratio:.2f}", pe_status)
-            else:
-                st.metric("P/E Ratio", "N/A")
-        
-        with fund_col2:
-            pb_ratio = info.get('priceToBook')
-            if pb_ratio:
-                pb_status = "Low" if pb_ratio < 1.5 else "High" if pb_ratio > 3 else "Reasonable"
-                st.metric("P/B Ratio", f"{pb_ratio:.2f}", pb_status)
-            else:
-                st.metric("P/B Ratio", "N/A")
-        
-        with fund_col3:
-            market_cap = info.get('marketCap')
-            if market_cap:
-                cap_category = "Large" if market_cap > 2e12 else "Mid" if market_cap > 5e11 else "Small"
-                st.metric("Market Cap", f"₹{market_cap/1e7:.0f} Cr", cap_category)
-            else:
-                st.metric("Market Cap", "N/A")
-    
-    # Risk Analysis
-    if "Risk" in analysis_type:
-        st.header("⚠️ Risk Analysis")
-        
-        risk_col1, risk_col2 = st.columns(2)
-        
-        with risk_col1:
-            # Simple risk score based on volatility and drawdown
-            volatility = hist['Volatility'].iloc[-1]
-            max_drawdown = (hist['Close'] / hist['Close'].expanding().max() - 1).min() * 100
-            risk_score = min(10, (volatility / 10) + abs(max_drawdown))
-            
-            st.metric("Risk Score", f"{risk_score:.1f}/10")
-            
-            if risk_score > 7:
-                st.error("High Risk - Consider careful position sizing")
-            elif risk_score > 5:
-                st.warning("Medium Risk - Monitor closely")
-            else:
-                st.success("Low Risk - Favorable conditions")
-        
-        with risk_col2:
-            st.write("**Risk Factors:**")
-            st.write(f"- Volatility: {volatility:.1f}%")
-            st.write(f"- Max Drawdown: {max_drawdown:.1f}%")
-            st.write("- Market Cap: " + ("Large" if (info.get('marketCap', 0) > 2e12) else "Mid/Small"))
-    
-    # Final Recommendation
-    st.header("🎯 Investment Conclusion")
-    
-    conclusion_col1, conclusion_col2 = st.columns([2, 1])
-        with conclusion_col1:
-            # Display comprehensive recommendation
-            recommendation = "STRONG BUY" if pred_return > 20 else "BUY" if pred_return > 10 else "HOLD" if pred_return > -5 else "SELL"
-            
-            if recommendation == "STRONG BUY":
-                st.success(f"🎯 **Recommendation: {recommendation}**")
-                st.write("High conviction opportunity with strong technical and fundamental alignment.")
-            elif recommendation == "BUY":
-                st.info(f"📈 **Recommendation: {recommendation}**")
-                st.write("Positive outlook with good risk-reward setup.")
-            elif recommendation == "HOLD":
-                st.warning(f"⏸️ **Recommendation: {recommendation}**")
-                st.write("Neutral outlook - wait for better entry or confirmation.")
-            else:
-                st.error(f"⚠️ **Recommendation: {recommendation}**")
-                st.write("Negative outlook - consider reducing exposure.")
-        
-        with conclusion_col2:
-            st.metric("Confidence", f"{min(abs(pred_return) * 3, 95):.0f}%")
-            st.metric("Risk Level", "Low" if risk_score < 5 else "Medium" if risk_score < 7 else "High")
-    
-    except Exception as e:
-        st.error(f"❌ Analysis Error: {str(e)}")
-        st.info("💡 Try a different stock symbol or check your internet connection.")
 
-# CRITICAL: Button trigger logic - This is what makes the Analyze button actually work!
-if analyze_btn:
-    run_comprehensive_analysis()
+        # compute targets
+        entry = price
+        base_sl = 0.03
+        sl = entry*(1-base_sl) if pred_pct>=0 else entry*(1+base_sl)
+        time_factor = np.sqrt(max(1, pred_days/7))
+        targets = [entry + (pred_pct/100)*entry*mult*time_factor for mult in [0.4,0.8,1.2,1.6]]
+        st.subheader("Trading Plan")
+        st.write(f"Entry: ₹{entry:.2f}")
+        st.write(f"Stop Loss: ₹{sl:.2f}")
+        for i,t in enumerate(targets,1):
+            st.write(f"Target {i}: ₹{t:.2f} ({(t-entry)/entry*100:+.1f}%)")
+        perf = BG.get_performance_report()
+        st.subheader("Learner Live Metrics")
+        st.write(f"- Directional Acc (EMA): {perf['directional_accuracy']*100:.2f}%")
+        st.write(f"- MAE (EMA): {perf['mae']:.4f}")
+        st.write(f"- Samples trained: {perf['total_samples']:,}")
 
-elif scan_btn:
-    with st.spinner("🔍 Scanning for high-opportunity stocks..."):
-        try:
-            recommendations = BG_LEARNER.get_high_return_recommendations(min_return=10, days=7)
-            
-            st.header("📊 Stock Scanner Results")
-            
-            if recommendations:
-                st.success(f"Found {len(recommendations)} high-potential opportunities!")
-                
-                # Create results table
-                scan_df = pd.DataFrame(recommendations)
-                scan_df = scan_df.sort_values('expected_return', ascending=False)
-                
-                # Display top opportunities
-                for idx, row in scan_df.head(10).iterrows():
-                    with st.expander(f"🎯 {row['symbol']} - Expected Return: {row['expected_return']:.1f}%"):
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            st.metric("Current Price", f"₹{row['current_price']:.2f}")
-                        with col2:
-                            st.metric("Target Price", f"₹{row['target_price']:.2f}")
-                        with col3:
-                            st.metric("Timeframe", f"{row['days']} days")
-            else:
-                st.warning("No high-confidence opportunities found at this time.")
-                st.info("Try adjusting the scanner parameters or check back later.")
-        
-        except Exception as e:
-            st.error(f"Scanner Error: {str(e)}")
+# show a scan button
+if st.button("Scan sample high-potential (10%+)"):
+    with st.spinner("Scanning big random subset..."):
+        recs = BG.get_high_return_recommendations(min_return=10, days=7)
+        if not recs:
+            st.info("No high-confidence opportunities found in this sample.")
+        else:
+            for r in recs:
+                st.markdown(f"**{r['symbol']}** — Est: {r['predicted_return_pct']:+.2f}% | Conf: {r['confidence']:.2f}")
+                st.write(f"Entry: ₹{r['current_price']:.2f}  Target: ₹{r['target_price']:.2f}")
 
-# Auto-refresh mechanism (every 60 seconds)
-if 'last_refresh' not in st.session_state:
-    st.session_state['last_refresh'] = time.time()
-
-current_time = time.time()
-if current_time - st.session_state['last_refresh'] > 60:
-    st.session_state['last_refresh'] = current_time
-    st.rerun()
-
-# Footer
-st.markdown("---")
-st.markdown("""
-<div style='text-align: center; color: #888; padding: 20px;'>
-    <p>⚠️ <strong>Disclaimer:</strong> This tool is for educational and informational purposes only.</p>
-    <p>Not financial advice. Always do your own research and consult with a qualified financial advisor.</p>
-    <p>Past performance does not guarantee future results. Stock markets involve risk.</p>
-    <p style='margin-top: 10px; font-size: 12px;'>JINNI AI © 2025 | Powered by Advanced ML Algorithms</p>
-</div>
-""", unsafe_allow_html=True)
-    
+st.markdown("<hr><small style='color:#666'>Universe fetch attempts NSE official -> GitHub fallbacks -> BSE fallbacks. If internet sources fail, the app uses a small fallback list. To include every single listed security reliably in production you may: (1) host a daily-updated CSV of tickers, or (2) provide exchange-licensed APIs.</small>", unsafe_allow_html=True)
