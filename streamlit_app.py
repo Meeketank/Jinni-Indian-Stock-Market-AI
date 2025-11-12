@@ -229,22 +229,22 @@ if analyze_btn or True:  # Auto-analyze on load
             
             with col2:
                 # INTELLIGENT RECOMMENDATION - Uses TradingSignals module
-            # This FIXES the contradiction issue by aligning with predictions
-            trading_signals = TradingSignals()
+                        # This FIXES the contradiction issue by aligning with predictions
+                        trading_signals = TradingSignals()
             
-            signal = trading_signals.generate_trading_signal(
-                current_price=current_price,
-                    predicted_price=pred_price,
-                prediction_confidence=0.80,  # High confidence from our model
-                technical_indicators=hist,
-                historical_data=historical_data,
-                recommendation='INITIAL'
-            )
-            
-            recommendation = signal['action']
-            reason = signal['reasoning']
-            confidence_level = signal['confidence']    recommendation = "🔴 SELL"
-                    reason = "Stock is overbought (RSI > 70)"
+                                    signal = trading_signals.generate_trading_signal(
+                            current_price=current_price,
+                                    predicted_price=pred_price,
+                                prediction_confidence=0.80,  # High confidence from our model
+                            technical_indicators=hist,
+                            historical_data=historical_data,
+                                recommendation='INITIAL'
+                        )
+                        
+                        recommendation = signal['action']
+                            reason = signal['reasoning']
+                        confidence_level = signal['confidence']    recommendation = "🔴 SELL"
+                                    reason = "Stock is overbought (RSI > 70)"
                 
                 st.markdown(f"""
                 <div class="prediction-box">
