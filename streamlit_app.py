@@ -328,13 +328,52 @@ def calculate_technical_indicators(df):
     return df
 
 def simple_prediction(df, days):
+        # IMPROVED PREDICTION MODEL - More realistic price targets
     if df is None or df.empty:
         return 0.0
-    recent_changes = df["Close"].pct_change().tail(30).mean()
+    
     current_price = df["Close"].iloc[-1]
-    predicted_price = current_price * (1 + recent_changes * days)
+    
+    # Calculate multiple trend indicators
+    recent_5d_change = df["Close"].pct_change().tail(5).mean()
+    recent_20d_change = df["Close"].pct_change().tail(20).mean()
+    recent_60d_change = df["Close"].pct_change().tail(60).mean()
+    
+    # Momentum-based prediction (weighted recent changes)
+    momentum_factor = (recent_5d_change * 0.5 + recent_20d_change * 0.3 + recent_60d_change * 0.2)
+    
+    # Amplify the prediction based on days horizon (longer = more movement expected)
+    time_multiplier = np.sqrt(days / 30)  # Square root scaling for realistic growth
+    
+    # Add volatility component for realistic movement
+    volatility = df["Close"].pct_change().std() * np.sqrt(252)  # Annualized volatility
+    volatility_boost = volatility * 0.3  # Add 30% of volatility to prediction
+    
+    # Calculate trend strength from moving averages
+    if len(df) >= 50:
+        ma20 = df["Close"].rolling(20).mean().iloc[-1]
+        ma50 = df["Close"].rolling(50).mean().iloc[-1]
+        if ma20 > ma50:
+            trend_boost = 0.05  # 5% bullish boost
+        elif ma20 < ma50:
+            trend_boost = -0.05  # 5% bearish boost
+        else:
+            trend_boost = 0
+    else:
+        trend_boost = 0
+    
+    # Combine all factors for final prediction
+    total_change = (momentum_factor * days * time_multiplier) + volatility_boost + trend_boost
+    
+    # Ensure minimum meaningful prediction (at least 3-5% move over 90 days)
+    if abs(total_change) < 0.03 and days >= 30:
+        total_change = 0.05 if momentum_factor > 0 else -0.03
+    
+    # Cap extreme predictions (max ±40% to stay realistic)
+    total_change = max(-0.40, min(0.40, total_change))
+    
+    predicted_price = current_price * (1 + total_change)
     return float(predicted_price)
-
 def create_price_chart(df):
     fig = go.Figure()
     fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Price"))
