@@ -1,7 +1,7 @@
+# main.py - Enhanced Main Application
 """
-JINNI - AI-Powered Indian Stock Market Analysis System (Streamlit)
-Full app with upgraded BackgroundLearnerV2 (ensemble online models, EMA-smoothed metrics,
-feature engineering, ATR stops, multi-targets, confidence-weighted scoring).
+JINNI - AI-Powered Indian Stock Market Analysis System
+Advanced version with real-time learning, improved accuracy, and comprehensive analysis
 """
 
 import streamlit as st
@@ -9,642 +9,751 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 import warnings
 import threading
 import time
 import os
 import pickle
-import random
-from typing import List
+import json
+from typing import List, Dict, Tuple
+import requests
+from bs4 import BeautifulSoup
+
 warnings.filterwarnings("ignore")
 
-# ----------------------------
-# Lightweight Online Models
-# ----------------------------
-class OnlineRegressor:
-    def __init__(self, n_features, lr=0.004, l2=1e-4):
-        self.w = np.zeros(n_features, dtype=float)
-        self.b = 0.0
-        self.lr = lr
-        self.l2 = l2
+# Import enhanced modules
+from enhanced_learner import EnhancedBackgroundLearner
+from fundamental_analyzer import FundamentalAnalyzer
+from realtime_price import RealTimePriceTracker
 
-    def predict(self, X):
-        if X.ndim == 1:
-            return float(X.dot(self.w) + self.b)
-        return X.dot(self.w) + self.b
+# Initialize core components
+BG_LEARNER = EnhancedBackgroundLearner()
+FUNDAMENTAL_ANALYZER = FundamentalAnalyzer()
+PRICE_TRACKER = RealTimePriceTracker()
 
-    def partial_fit(self, X, y):
-        if X.size == 0:
-            return
-        preds = self.predict(X)
-        errs = preds - y
-        grad_w = (errs[:, None] * X).mean(axis=0) + self.l2 * self.w
-        grad_b = errs.mean()
-        self.w -= self.lr * grad_w
-        self.b -= self.lr * grad_b
-
-    def save_to_dict(self):
-        return {"w_reg": self.w, "b_reg": self.b}
-
-    def load_from_dict(self, data):
-        self.w = data.get("w_reg", self.w)
-        self.b = data.get("b_reg", self.b)
-
-class OnlineLogistic:
-    def __init__(self, n_features, lr=0.008, l2=1e-4):
-        self.w = np.zeros(n_features, dtype=float)
-        self.b = 0.0
-        self.lr = lr
-        self.l2 = l2
-
-    def _sigmoid(self, x):
-        return 1.0 / (1.0 + np.exp(-np.clip(x, -50, 50)))
-
-    def predict_proba(self, X):
-        z = X.dot(self.w) + self.b
-        return self._sigmoid(z)
-
-    def predict(self, X):
-        return (self.predict_proba(X) >= 0.5).astype(int)
-
-    def partial_fit(self, X, y):
-        if X.size == 0:
-            return
-        p = self.predict_proba(X)
-        errs = p - y
-        grad_w = (errs[:, None] * X).mean(axis=0) + self.l2 * self.w
-        grad_b = errs.mean()
-        self.w -= self.lr * grad_w
-        self.b -= self.lr * grad_b
-
-    def save_to_dict(self):
-        return {"w_log": self.w, "b_log": self.b}
-
-    def load_from_dict(self, data):
-        self.w = data.get("w_log", self.w)
-        self.b = data.get("b_log", self.b)
-
-# ----------------------------
-# Feature helpers
-# ----------------------------
-def compute_rsi(series: pd.Series, period=14) -> pd.Series:
-    delta = series.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(period, min_periods=1).mean()
-    avg_loss = loss.rolling(period, min_periods=1).mean().replace(0, np.nan)
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.fillna(50)
-
-def compute_atr_series(df: pd.DataFrame, period=14) -> pd.Series:
-    high_low = df['High'] - df['Low']
-    high_pc = np.abs(df['High'] - df['Close'].shift(1))
-    low_pc = np.abs(df['Low'] - df['Close'].shift(1))
-    tr = pd.concat([high_low, high_pc, low_pc], axis=1).max(axis=1)
-    atr = tr.rolling(period, min_periods=1).mean()
-    return atr.fillna(method='ffill').fillna(0.0)
-
-def build_features_from_df(df: pd.DataFrame, n_lags=6):
-    """
-    Features:
-    - n_lags previous daily returns
-    - (MA20 - MA50) / price
-    - RSI / 100
-    - ATR / price
-    - recent vol (std of returns)
-    Returns X, y_reg (next-day returns), y_dir (binary)
-    """
-    if df is None or len(df) < n_lags + 5:
-        return np.empty((0, n_lags + 4)), np.empty((0,)), np.empty((0,))
-    close = df['Close'].values
-    returns = (close[1:] - close[:-1]) / close[:-1]  # length N-1
-    ma20 = df['Close'].rolling(20, min_periods=1).mean().values
-    ma50 = df['Close'].rolling(50, min_periods=1).mean().values
-    rsi = compute_rsi(df['Close']).values
-    atr = compute_atr_series(df).values
-    X, y_reg, y_dir = [], [], []
-    # we align such that returns[i] is return from day i -> i+1
-    for i in range(n_lags, len(returns)):
-        lag = returns[i - n_lags: i]
-        # index mapping: returns index i corresponds to df index i+1
-        idx = i + 1
-        price = close[idx] if idx < len(close) else close[-1]
-        ma_diff = (ma20[idx] - ma50[idx]) / (price if price != 0 else 1)
-        rsi_val = rsi[idx] / 100.0
-        atr_val = atr[idx] / (price if price != 0 else 1)
-        vol = float(np.std(returns[max(0, i - 20): i + 1])) if i >= 1 else 0.0
-        feat = np.concatenate([lag, [ma_diff, rsi_val, atr_val, vol]])
-        X.append(feat)
-        y_reg.append(returns[i])
-        y_dir.append(1 if returns[i] > 0 else 0)
-    return np.array(X), np.array(y_reg), np.array(y_dir)
-
-# ----------------------------
-# Improved BackgroundLearnerV2
-# ----------------------------
-class BackgroundLearnerV2:
-    def __init__(self, universe: List[str] = None, n_lags=6, interval_sec=12, batch_size=12, model_path="bg_v2.pkl"):
-        # provide your 114 tickers list here or pass it into constructor
-        default_universe = [
-            "RELIANCE.NS","TCS.NS","INFY.NS","HDFCBANK.NS","ICICIBANK.NS","HINDUNILVR.NS",
-            "LT.NS","KOTAKBANK.NS","AXISBANK.NS","SBIN.NS","BHARTIARTL.NS","ITC.NS"
-        ]
-        self.universe = universe or default_universe
-        self.n_lags = n_lags
-        self.batch_size = batch_size
-        self.interval_sec = max(5, interval_sec)
-        self.model_path = model_path
-        n_features = n_lags + 4
-        self.regressor = OnlineRegressor(n_features=n_features, lr=0.004, l2=1e-4)
-        self.classifier = OnlineLogistic(n_features=n_features, lr=0.008, l2=1e-4)
-        self.ema_alpha = 0.06
-        self.metrics = {"dir_acc_ema": 0.5, "mae_ema": 0.5, "samples": 0}
-        self._stop = threading.Event()
-        self._thread = None
-        self.lock = threading.Lock()
-        self._load_if_exists()
-
-    def _load_if_exists(self):
-        if os.path.exists(self.model_path):
-            try:
-                with open(self.model_path, "rb") as f:
-                    data = pickle.load(f)
-                self.regressor.load_from_dict(data)
-                self.classifier.load_from_dict(data)
-                if "metrics" in data:
-                    self.metrics.update(data["metrics"])
-            except Exception:
-                pass
-
-    def _persist(self):
-        try:
-            with open(self.model_path, "wb") as f:
-                pdump = {}
-                pdump.update(self.regressor.save_to_dict())
-                pdump.update(self.classifier.save_to_dict())
-                pdump["metrics"] = self.metrics
-                pickle.dump(pdump, f)
-        except Exception:
-            pass
-
-    def start(self):
-        if self._thread and self._thread.is_alive():
-            return
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
-
-    def stop(self):
-        self._stop.set()
-        if self._thread:
-            self._thread.join(timeout=2)
-
-    def _fetch_history_safe(self, ticker, days=220):
-        try:
-            t = yf.Ticker(ticker)
-            df = t.history(period=f"{days}d", interval="1d", auto_adjust=False)
-            if df is None or df.empty:
-                return None
-            return df
-        except Exception:
-            return None
-
-    def _update_ema(self, dir_acc_batch, mae_batch, n_new):
-        with self.lock:
-            alpha = self.ema_alpha
-            self.metrics["dir_acc_ema"] = alpha * dir_acc_batch + (1 - alpha) * self.metrics["dir_acc_ema"]
-            self.metrics["mae_ema"] = alpha * mae_batch + (1 - alpha) * self.metrics["mae_ema"]
-            self.metrics["samples"] += n_new
-
-    def _loop(self):
-        while not self._stop.is_set():
-            try:
-                batch = random.sample(self.universe, min(self.batch_size, len(self.universe)))
-                dir_accs, maes, n_total = [], [], 0
-                for tk in batch:
-                    if self._stop.is_set():
-                        break
-                    df = self._fetch_history_safe(tk, days=300)
-                    if df is None or len(df) < self.n_lags + 10:
-                        continue
-                    X, y_reg, y_dir = build_features_from_df(df, n_lags=self.n_lags)
-                    if X.size == 0:
-                        continue
-                    preds_reg = self.regressor.predict(X)
-                    preds_dir_p = self.classifier.predict_proba(X)
-                    mae = float(np.mean(np.abs(preds_reg - y_reg)))
-                    dir_acc = float(np.mean((preds_dir_p >= 0.5) == (y_dir == 1)))
-                    # update models
-                    try:
-                        self.classifier.partial_fit(X, y_dir)
-                        self.regressor.partial_fit(X, y_reg)
-                    except Exception:
-                        pass
-                    dir_accs.append(dir_acc)
-                    maes.append(mae)
-                    n_total += len(y_reg)
-                    time.sleep(0.12)
-                if n_total > 0:
-                    batch_dir = float(np.mean(dir_accs)) if dir_accs else 0.5
-                    batch_mae = float(np.mean(maes)) if maes else 0.5
-                    self._update_ema(batch_dir, batch_mae, n_total)
-                    self._persist()
-                time.sleep(self.interval_sec)
-            except Exception:
-                time.sleep(self.interval_sec)
-
-    def get_performance_report(self):
-        with self.lock:
-            return {
-                "directional_accuracy": float(self.metrics["dir_acc_ema"]),
-                "mae": float(self.metrics["mae_ema"]),
-                "samples": int(self.metrics["samples"])
-            }
-
-    def predict_for_ticker(self, ticker):
-        df = self._fetch_history_safe(ticker, days=300)
-        if df is None or len(df) < self.n_lags + 5:
-            return 0.0, 0.0
-        X, _, _ = build_features_from_df(df, n_lags=self.n_lags)
-        if X.size == 0:
-            return 0.0, 0.0
-        latest = X[-1].reshape(1, -1)
-        pred_ret = float(self.regressor.predict(latest)[0])
-        prob_up = float(self.classifier.predict_proba(latest)[0])
-        # volatility heuristic
-        recent_returns = (df['Close'].values[1:] - df['Close'].values[:-1]) / df['Close'].values[:-1]
-        vol = float(np.std(recent_returns[-60:])) if len(recent_returns) >= 1 else 0.0
-        confidence = float(max(0.0, min(0.99, prob_up * (1.0 - min(0.85, vol * 4.0)))))
-        # calibrate signed return by classifier (push toward sign-probability)
-        signed = pred_ret * (prob_up * 2 - 1)
-        # damp extremes
-        signed = max(-0.6, min(0.6, signed))
-        return float(signed), confidence
-
-# instantiate BG_LEARNER (use your full universe list here if you want)
-BG_LEARNER = BackgroundLearnerV2(
-    universe=None,      # put your 114 tickers list here if you have it
-    n_lags=6,
-    interval_sec=12,
-    batch_size=12,
-    model_path="bg_v2.pkl"
+# Page Configuration
+st.set_page_config(
+    page_title="JINNI - AI Stock Analysis",
+    page_icon="🧞",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
-BG_LEARNER.start()
 
-# ----------------------------
-# Streamlit UI & analysis logic
-# ----------------------------
-st.set_page_config(page_title="JINNI - Indian Stock Market AI", page_icon="🧞", layout="wide")
-
-# CSS
+# Enhanced CSS
 st.markdown("""
-    <style>
-    .main-header { font-size:48px; font-weight:bold; text-align:center; color:#1E88E5; text-shadow:2px 2px 4px rgba(0,0,0,0.1); }
-    .sub-header { font-size:20px; text-align:center; color:#424242; margin-bottom:18px; }
-    .prediction-box { background:#E3F2FD; padding:16px; border-radius:10px; border-left:5px solid #1E88E5; }
-    </style>
+<style>
+    .main-header {
+        font-size: 3.5rem;
+        font-weight: 800;
+        text-align: center;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        margin-bottom: 0.5rem;
+        text-shadow: 2px 2px 4px rgba(0,0,0,0.1);
+    }
+    .sub-header {
+        font-size: 1.3rem;
+        text-align: center;
+        color: #666;
+        margin-bottom: 2rem;
+        font-weight: 300;
+    }
+    .metric-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        padding: 1.5rem;
+        border-radius: 15px;
+        color: white;
+        text-align: center;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        margin: 0.5rem;
+    }
+    .prediction-box {
+        background: #ffffff;
+        padding: 1.5rem;
+        border-radius: 15px;
+        border-left: 5px solid #1E88E5;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        margin: 1rem 0;
+    }
+    .buy-signal { border-left-color: #28a745 !important; background: #d4edda !important; }
+    .sell-signal { border-left-color: #dc3545 !important; background: #f8d7da !important; }
+    .hold-signal { border-left-color: #ffc107 !important; background: #fff3cd !important; }
+    .section-header {
+        font-size: 1.5rem;
+        font-weight: 600;
+        color: #333;
+        margin: 1.5rem 0 1rem 0;
+        padding-bottom: 0.5rem;
+        border-bottom: 2px solid #667eea;
+    }
+    .stock-card {
+        background: white;
+        padding: 1rem;
+        border-radius: 10px;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        margin: 0.5rem 0;
+        border-left: 4px solid #667eea;
+    }
+</style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-header">🧞 JINNI</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">AI-Powered Indian Stock Market Analysis & Prediction System</div>', unsafe_allow_html=True)
+# Header
+st.markdown('<div class="main-header">🧞 JINNI AI STOCK ANALYSIS</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">Advanced Real-time Indian Stock Market Analysis & Prediction System</div>', unsafe_allow_html=True)
 
 # Sidebar
 with st.sidebar:
-    st.image("https://raw.githubusercontent.com/microsoft/fluentui-emoji/main/assets/Genie/3D/genie_3d.png", width=130)
-    st.title("⚙️ Controls")
-    stock_symbol = st.text_input("Enter NSE/BSE Stock Symbol", value="RELIANCE.NS", help="Add .NS for NSE stocks, .BO for BSE stocks")
-    timeframe = st.selectbox("Select Timeframe", ["1 Month", "3 Months", "6 Months", "1 Year", "2 Years", "5 Years"])
-    pred_days = st.slider("Prediction Horizon (Days)", 1, 90, 30)
-    analyze_btn = st.button("🔮 Analyze Stock", use_container_width=True)
-    st.divider()
-    st.info("💡 Background learner runs automatically and updates performance metrics (EMA-smoothed).")
-
-timeframe_map = {"1 Month":"1mo","3 Months":"3mo","6 Months":"6mo","1 Year":"1y","2 Years":"2y","5 Years":"5y"}
-
-def fetch_stock_data(symbol, period):
-    try:
-        ticker = yf.Ticker(symbol)
-        hist = ticker.history(period=period, auto_adjust=False)
-        info = ticker.info if hasattr(ticker, "info") else {}
-        return hist, info, ticker
-    except Exception as e:
-        st.error(f"Error fetching data for {symbol}: {e}")
-        return None, None, None
-
-def calculate_technical_indicators(df):
-    if df is None or df.empty:
-        return df
-    df = df.copy()
-    df["MA5"] = df["Close"].rolling(window=5, min_periods=1).mean()
-    df["MA20"] = df["Close"].rolling(window=20, min_periods=1).mean()
-    df["MA50"] = df["Close"].rolling(window=50, min_periods=1).mean()
-    df["RSI"] = compute_rsi(df["Close"])
-    exp1 = df["Close"].ewm(span=12, adjust=False).mean()
-    exp2 = df["Close"].ewm(span=26, adjust=False).mean()
-    df["MACD"] = exp1 - exp2
-    df["Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
-    df["BB_Middle"] = df["Close"].rolling(window=20, min_periods=1).mean()
-    bb_std = df["Close"].rolling(window=20, min_periods=1).std().fillna(0)
-    df["BB_Upper"] = df["BB_Middle"] + (bb_std * 2)
-    df["BB_Lower"] = df["BB_Middle"] - (bb_std * 2)
-    df["ATR"] = compute_atr_series(df)
-    return df
-
-# improved simple prediction (momentum + volatility + trend_boost)
-def simple_prediction(df, days):
-    if df is None or df.empty:
-        return 0.0
-    current_price = df["Close"].iloc[-1]
-    recent_5d = df["Close"].pct_change().tail(5).mean()
-    recent_20d = df["Close"].pct_change().tail(20).mean()
-    recent_60d = df["Close"].pct_change().tail(60).mean()
-    momentum = recent_5d * 0.5 + recent_20d * 0.3 + recent_60d * 0.2
-    time_multiplier = np.sqrt(days / 30)
-    volatility = df["Close"].pct_change().std() * np.sqrt(252)
-    volatility_boost = volatility * 0.25
-    trend_boost = 0.0
-    if len(df) >= 50:
-        ma20 = df["Close"].rolling(20).mean().iloc[-1]
-        ma50 = df["Close"].rolling(50).mean().iloc[-1]
-        trend_boost = 0.05 if ma20 > ma50 else -0.05 if ma20 < ma50 else 0.0
-    total_change = (momentum * days * time_multiplier) + volatility_boost + trend_boost
-    if abs(total_change) < 0.03 and days >= 30:
-        total_change = 0.05 if momentum > 0 else -0.03
-    total_change = max(-0.5, min(0.5, total_change))
-    predicted_price = current_price * (1 + total_change)
-    return float(predicted_price)
-
-def create_price_chart(df):
-    fig = go.Figure()
-    fig.add_trace(go.Candlestick(
-        x=df.index,
-        open=df["Open"],
-        high=df["High"],
-        low=df["Low"],
-        close=df["Close"],
-        name="Price"
-    ))
-    for col in ["MA5","MA20","MA50"]:
-        if col in df.columns:
-            fig.add_trace(go.Scatter(x=df.index, y=df[col], name=col, line=dict(width=1)))
-    fig.update_layout(title="Price Chart with Technical Indicators", yaxis_title="Price (₹)", xaxis_title="Date", height=600, template="plotly_white")
-    return fig
-
-def compute_targets_from_prediction(current_price: float, pred_return: float, atr: float = None):
-    entry = current_price
-    if atr is None or atr <= 0:
-        atr = current_price * 0.02  # fallback 2% as ATR
-    # ATR-based stop loss: 1.5 ATR for buy, symmetric for sell
-    if pred_return >= 0:
-        stop_loss = entry - 1.5 * atr
-    else:
-        stop_loss = entry + 1.5 * atr
-    # build conservative targets scaled to predicted return and ATR multipliers
-    t1 = entry + np.sign(pred_return) * max(abs(pred_return) * 0.5 * entry, 0.8 * atr)
-    t2 = entry + np.sign(pred_return) * max(abs(pred_return) * 1.0 * entry, 1.2 * atr)
-    t3 = entry + np.sign(pred_return) * max(abs(pred_return) * 1.5 * entry, 2.0 * atr)
-    t4 = entry + np.sign(pred_return) * max(abs(pred_return) * 2.0 * entry, 3.0 * atr)
-    # ensure targets are sensible (not equal to entry)
-    targets = [max(0.01, x) for x in [t1, t2, t3, t4]]
-    risk = abs(entry - stop_loss) if stop_loss != entry else entry * 0.01
-    reward = abs(t2 - entry) if t2 != entry else 0.0
-    rr = (reward / risk) if risk > 0 else 0.0
-    return entry, stop_loss, targets, rr
-
-# ----------------------------
-# Main analysis routine
-# ----------------------------
-def run_analysis():
-    period = timeframe_map.get(timeframe, "6mo")
-    hist, info, ticker = fetch_stock_data(stock_symbol, period)
-    if hist is None or hist.empty:
-        st.error("Could not fetch stock data. Check symbol and try again.")
-        return
-    hist = calculate_technical_indicators(hist)
-    company_name = info.get("longName") or info.get("shortName") or stock_symbol
-    st.header(f"📊 {company_name}")
-
-    # Key metrics
-    col1, col2, col3, col4, col5 = st.columns(5)
-    current_price = float(hist["Close"].iloc[-1])
-    prev_close = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else current_price
-    change = current_price - prev_close
-    change_pct = (change / prev_close) * 100 if prev_close != 0 else 0.0
-    market_cap = info.get("marketCap", None)
-
-    with col1:
-        st.metric("Current Price", f"₹{current_price:.2f}", f"{change:+.2f} ({change_pct:+.2f}%)")
-    with col2:
-        st.metric("Day High", f"₹{float(hist['High'].iloc[-1]):.2f}")
-    with col3:
-        st.metric("Day Low", f"₹{float(hist['Low'].iloc[-1]):.2f}")
-    with col4:
-        st.metric("Volume", f"{int(hist['Volume'].iloc[-1]):,}")
-    with col5:
-        if market_cap:
-            st.metric("Market Cap (Cr)", f"₹{market_cap / 1e7:.2f}")
-
-    st.plotly_chart(create_price_chart(hist), use_container_width=True)
-
-    # Use BG_LEARNER to predict (signed daily return) + confidence
-    st.header("🔮 AI Predictions")
-    bg_pred_daily, bg_conf = BG_LEARNER.predict_for_ticker(stock_symbol)
-    # scale to pred_days: conservative scaling using sqrt(days)
-    pred_price_bg = current_price * (1 + bg_pred_daily * np.sqrt(max(1, pred_days)))
-    pred_change_bg = ((pred_price_bg - current_price) / current_price) * 100 if current_price != 0 else 0.0
-
-    # fallback:
-    fallback_price = simple_prediction(hist, pred_days)
-    pred_price = pred_price_bg if bg_conf >= 0.10 else 0.65 * fallback_price + 0.35 * pred_price_bg
-    pred_change = ((pred_price - current_price) / current_price) * 100 if current_price != 0 else 0.0
-
+    st.image("https://raw.githubusercontent.com/microsoft/fluentui-emoji/main/assets/Genie/3D/genie_3d.png", width=120)
+    st.title("🎯 Analysis Controls")
+    
+    # Stock selection
+    stock_symbol = st.text_input("📈 Stock Symbol", value="RELIANCE.NS", 
+                               help="Enter NSE stock symbol (e.g., RELIANCE.NS, TCS.NS)")
+    
+    # Analysis timeframe
+    timeframe = st.selectbox("📅 Timeframe", 
+                           ["1 Week", "1 Month", "3 Months", "6 Months", "1 Year", "2 Years", "5 Years"])
+    
+    # Prediction horizon
+    pred_days = st.slider("🎯 Prediction Horizon (Days)", 1, 90, 7, 
+                         help="Number of days for price prediction")
+    
+    # Analysis type
+    analysis_type = st.multiselect(
+        "🔍 Analysis Types",
+        ["Technical", "Fundamental", "Sentiment", "Risk", "Momentum"],
+        default=["Technical", "Fundamental"]
+    )
+    
+    # Action buttons
     col1, col2 = st.columns(2)
     with col1:
-        st.markdown(f"""
-            <div class="prediction-box">
-                <h3>Target Price ({pred_days} days)</h3>
-                <h2>₹{pred_price:.2f}</h2>
-                <p style="font-size:16px; color:{'green' if pred_change>0 else 'red'}">{pred_change:+.2f}% from current price</p>
-                <p style="font-size:12px; color:#666;">Model confidence: {bg_conf:.2f} (directional)</p>
-            </div>
-        """, unsafe_allow_html=True)
-
-    # Recommendation rules (sharper thresholds)
-    rsi = hist['RSI'].iloc[-1] if 'RSI' in hist.columns else 50.0
-    ma_signal = "Bullish" if hist['Close'].iloc[-1] > hist['MA20'].iloc[-1] else "Bearish"
-
-    # Interpret predicted percent (over pred_days)
-    if pred_change >= 15 and bg_conf >= 0.45:
-        recommendation = "🔵 STRONG BUY"
-    elif pred_change >= 7 and bg_conf >= 0.35:
-        recommendation = "🟢 BUY"
-    elif pred_change >= 3 and bg_conf >= 0.25:
-        recommendation = "🟡 BUY (Tactical)"
-    elif pred_change <= -15 and bg_conf >= 0.45:
-        recommendation = "🔴 STRONG SELL"
-    elif pred_change <= -7 and bg_conf >= 0.35:
-        recommendation = "🔴 SELL"
-    elif pred_change <= -3 and bg_conf >= 0.25:
-        recommendation = "🟠 SELL (Tactical)"
-    else:
-        recommendation = "⚪ HOLD"
-
-    reason = f"Pred {pred_change:+.2f}% over {pred_days} days | RSI {rsi:.1f} | MA trend {ma_signal}"
-    if rsi > 75 and "BUY" in recommendation:
-        reason += f" | ⚠️ RSI overbought ({rsi:.1f})"
-    if rsi < 25 and "SELL" in recommendation:
-        reason += f" | ⚠️ RSI oversold ({rsi:.1f})"
-
-    # Trading plan using ATR
-    atr = float(hist["ATR"].iloc[-1]) if "ATR" in hist.columns else None
-    entry, stop_loss, targets, rr = compute_targets_from_prediction(current_price, bg_pred_daily, atr=atr)
-    confidence_level = round(BG_LEARNER.get_performance_report()["directional_accuracy"] * 100, 2)
-
+        analyze_btn = st.button("🚀 Analyze", use_container_width=True)
     with col2:
-        st.markdown(f"""
-            <div class="prediction-box">
-                <h3>AI Recommendation</h3>
-                <h2>{recommendation}</h2>
-                <p style="font-size:14px;">{reason}</p>
-                <p style="font-size:12px; color:#666;">Model directional accuracy (EMA): {confidence_level:.2f}%</p>
-            </div>
-        """, unsafe_allow_html=True)
-
-    # Trading plan display
-    if "BUY" in recommendation:
-        st.markdown(f"""
-            <div class="prediction-box" style="background-color:#dff0d8; border-left:4px solid #28a745;">
-                <h3>💰 Trading Plan</h3>
-                <p><strong>Entry:</strong> ₹{entry:.2f}</p>
-                <p><strong>Stop Loss:</strong> ₹{stop_loss:.2f}</p>
-                <p><strong>Target 1:</strong> ₹{targets[0]:.2f}</p>
-                <p><strong>Target 2:</strong> ₹{targets[1]:.2f}</p>
-                <p><strong>Target 3:</strong> ₹{targets[2]:.2f}</p>
-                <p><strong>Target 4:</strong> ₹{targets[3]:.2f}</p>
-                <p><strong>Risk-Reward (est):</strong> 1:{rr:.2f}</p>
-                <p><strong>Model Confidence (directional):</strong> {confidence_level:.2f}%</p>
-            </div>
-        """, unsafe_allow_html=True)
-    elif "SELL" in recommendation:
-        st.markdown(f"""
-            <div class="prediction-box" style="background-color:#f8d7da; border-left:4px solid #dc3545;">
-                <h3>💰 Trading Plan (SHORT)</h3>
-                <p><strong>Entry (short):</strong> ₹{entry:.2f}</p>
-                <p><strong>Stop Loss:</strong> ₹{stop_loss:.2f}</p>
-                <p><strong>Target 1:</strong> ₹{targets[0]:.2f}</p>
-                <p><strong>Target 2:</strong> ₹{targets[1]:.2f}</p>
-                <p><strong>Target 3:</strong> ₹{targets[2]:.2f}</p>
-                <p><strong>Target 4:</strong> ₹{targets[3]:.2f}</p>
-                <p><strong>Model Confidence (directional):</strong> {confidence_level:.2f}%</p>
-            </div>
-        """, unsafe_allow_html=True)
-    else:
-        st.markdown(f"""
-            <div class="prediction-box" style="background-color:#fff3cd; border-left:4px solid #ffc107;">
-                <h3>⏸️ Watch & Wait</h3>
-                <p>Neutral outlook. Observe watch levels or wait for a clearer signal.</p>
-                <p><strong>Model directional accuracy (EMA):</strong> {confidence_level:.2f}%</p>
-            </div>
-        """, unsafe_allow_html=True)
-
-    # Technical indicators panel
-    st.header("📈 Technical Analysis")
-    col1, col2, col3, col4 = st.columns(4)
-    rsi_val = float(hist["RSI"].iloc[-1])
-    macd_val = float(hist["MACD"].iloc[-1])
-    ma_sig = "Bullish" if hist["Close"].iloc[-1] > hist["MA20"].iloc[-1] else "Bearish"
-    volatility = hist["Close"].pct_change().std() * np.sqrt(252) * 100
-
-    with col1:
-        st.metric("RSI (14)", f"{rsi_val:.2f}")
-    with col2:
-        st.metric("MACD", f"{macd_val:.4f}")
-    with col3:
-        st.metric("MA Signal", ma_sig)
-    with col4:
-        st.metric("Volatility (annualized)", f"{volatility:.2f}%")
-
-    # Reasoning
-    st.header("🧠 AI Analysis Reasoning")
-    reason_lines = [
-        f"1. Price Action: Current price ₹{current_price:.2f} is {'above' if current_price > hist['MA20'].iloc[-1] else 'below'} the 20-day MA (₹{hist['MA20'].iloc[-1]:.2f}).",
-        f"2. RSI Analysis: RSI at {rsi_val:.2f} indicates " + ("oversold - potential buy." if rsi_val < 30 else ("overbought - consider taking profits." if rsi_val > 70 else "neutral momentum.")),
-        f"3. Trend: {'Uptrend' if hist['Close'].iloc[-1] > hist['MA50'].iloc[-1] else 'Downtrend'}.",
-        f"4. Prediction Confidence: Model directional accuracy (EMA) {confidence_level:.2f}%.",
-        f"5. Risk Level: {'High' if volatility > 40 else 'Moderate' if volatility > 25 else 'Low'} (Volatility: {volatility:.2f}%)."
-    ]
-    st.markdown("<br/>".join(reason_lines), unsafe_allow_html=True)
-
-    # Live model performance
-    st.header("🎯 Model Performance (Live)")
-    perf = BG_LEARNER.get_performance_report()
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Directional Accuracy (EMA)", f"{perf['directional_accuracy']*100:.2f}%")
-    with col2:
-        st.metric("MAE (EMA)", f"{perf['mae']:.4f}")
-    with col3:
-        st.metric("Samples Trained", f"{perf['samples']:,}")
-
-    st.success("✅ Analysis complete. Background learner continues to train in background.")
-
-# Sidebar: show learner metrics and recommendations scan
-with st.sidebar:
+        realtime_btn = st.button("📊 Live Data", use_container_width=True)
+    
     st.divider()
-    st.subheader("🧪 Background Learner (auto)")
+    
+    # Model performance
+    st.subheader("🧠 AI Model Performance")
     perf = BG_LEARNER.get_performance_report()
-    st.metric("Directional Accuracy (EMA)", f"{perf['directional_accuracy']*100:.2f}%")
-    st.metric("MAE (EMA)", f"{perf['mae']:.4f}")
-    st.caption(f"Samples trained: {perf['samples']:,}")
-
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Accuracy", f"{perf['accuracy']:.1f}%")
+        st.metric("Samples", f"{perf['total_samples']:,}")
+    with col2:
+        st.metric("Precision", f"{perf['precision']:.1f}%")
+        st.metric("Recall", f"{perf['recall']:.1f}%")
+    
     st.divider()
-    st.subheader("🔍 Scan Top Stocks (model-driven)")
-    if st.button("Scan & Recommend (use model)"):
-        recs = []
-        universe = BG_LEARNER.universe
-        for tk in universe:
-            try:
-                hist_tmp, info_tmp, _ = fetch_stock_data(tk, "1y")
-                if hist_tmp is None or hist_tmp.empty:
-                    continue
-                cur_p = float(hist_tmp["Close"].iloc[-1])
-                pred_r, conf = BG_LEARNER.predict_for_ticker(tk)
-                # scale to 7-day expected percent (rough)
-                pred_pct_7d = pred_r * np.sqrt(7) * 100
-                if abs(pred_pct_7d) < 2.0 or conf < 0.15:
-                    # filter out tiny picks and low confidence
-                    continue
-                entry, stop_loss, targets, rr = compute_targets_from_prediction(cur_p, pred_r, atr=compute_atr_series(hist_tmp).iloc[-1] if "ATR" not in hist_tmp else hist_tmp["ATR"].iloc[-1])
-                recs.append({
-                    "ticker": tk,
-                    "pred_pct_7d": pred_pct_7d,
-                    "entry": entry, "stop_loss": stop_loss, "targets": targets, "rr": rr, "conf": conf
-                })
-            except Exception:
-                continue
-        recs_sorted = sorted(recs, key=lambda x: x["pred_pct_7d"], reverse=True)[:12]
-        if not recs_sorted:
-            st.info("No high-confidence recommendations found. Try widening universe or increasing batch_size in learner.")
+    
+    # Quick recommendations
+    st.subheader("💎 Top Picks (Weekly 10%+)")
+    if st.button("Scan High-Potential Stocks"):
+        with st.spinner("Scanning for high-return opportunities..."):
+            recommendations = BG_LEARNER.get_high_return_recommendations(min_return=10, days=7)
+            for i, rec in enumerate(recommendations[:5], 1):
+                with st.expander(f"{i}. {rec['symbol']} - Est: {rec['predicted_return']:.1f}%"):
+                    st.write(f"**Current:** ₹{rec['current_price']:.2f}")
+                    st.write(f"**Target:** ₹{rec['target_price']:.2f}")
+                    st.write(f"**Confidence:** {rec['confidence']:.1f}%")
+                    st.write(f"**Signal:** {rec['signal']}")
+
+# Enhanced data fetching with caching
+@st.cache_data(ttl=300)
+def fetch_stock_data(symbol: str, period: str) -> Tuple[pd.DataFrame, Dict, yf.Ticker]:
+    """Fetch stock data with enhanced error handling"""
+    try:
+        ticker = yf.Ticker(symbol)
+        hist = ticker.history(period=period, auto_adjust=True)
+        
+        if hist.empty:
+            st.error(f"No data found for {symbol}")
+            return None, {}, None
+            
+        info = ticker.info
+        return hist, info, ticker
+        
+    except Exception as e:
+        st.error(f"Error fetching data: {str(e)}")
+        return None, {}, None
+
+# Enhanced technical indicators
+def calculate_enhanced_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """Calculate comprehensive technical indicators"""
+    if df is None or df.empty:
+        return df
+        
+    df = df.copy()
+    
+    # Moving averages
+    for period in [5, 10, 20, 50, 100, 200]:
+        df[f'MA{period}'] = df['Close'].rolling(window=period).mean()
+    
+    # RSI
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df['RSI'] = 100 - (100 / (1 + rs))
+    
+    # MACD
+    exp1 = df['Close'].ewm(span=12).mean()
+    exp2 = df['Close'].ewm(span=26).mean()
+    df['MACD'] = exp1 - exp2
+    df['MACD_Signal'] = df['MACD'].ewm(span=9).mean()
+    df['MACD_Histogram'] = df['MACD'] - df['MACD_Signal']
+    
+    # Bollinger Bands
+    df['BB_Middle'] = df['Close'].rolling(20).mean()
+    bb_std = df['Close'].rolling(20).std()
+    df['BB_Upper'] = df['BB_Middle'] + (bb_std * 2)
+    df['BB_Lower'] = df['BB_Middle'] - (bb_std * 2)
+    df['BB_Width'] = (df['BB_Upper'] - df['BB_Lower']) / df['BB_Middle']
+    
+    # Volume indicators
+    df['Volume_MA'] = df['Volume'].rolling(20).mean()
+    df['Volume_Ratio'] = df['Volume'] / df['Volume_MA']
+    
+    # Support and Resistance
+    df['Resistance'] = df['High'].rolling(20).max()
+    df['Support'] = df['Low'].rolling(20).min()
+    
+    # Volatility
+    df['Volatility'] = df['Close'].pct_change().rolling(20).std() * np.sqrt(252) * 100
+    
+    return df
+
+# Enhanced chart creation
+def create_enhanced_chart(df: pd.DataFrame, symbol: str) -> go.Figure:
+    """Create comprehensive stock chart"""
+    fig = make_subplots(
+        rows=4, cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.05,
+        subplot_titles=('Price with Indicators', 'Volume', 'RSI', 'MACD'),
+        row_heights=[0.4, 0.15, 0.15, 0.15]
+    )
+    
+    # Price chart
+    fig.add_trace(go.Candlestick(
+        x=df.index, open=df['Open'], high=df['High'], 
+        low=df['Low'], close=df['Close'], name='Price'
+    ), row=1, col=1)
+    
+    # Moving averages
+    for ma in ['MA20', 'MA50', 'MA200']:
+        if ma in df.columns:
+            fig.add_trace(go.Scatter(
+                x=df.index, y=df[ma], name=ma, line=dict(width=1)
+            ), row=1, col=1)
+    
+    # Bollinger Bands
+    if 'BB_Upper' in df.columns:
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df['BB_Upper'], name='BB Upper',
+            line=dict(color='rgba(255,0,0,0.3)', dash='dash')
+        ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df['BB_Lower'], name='BB Lower',
+            line=dict(color='rgba(0,255,0,0.3)', dash='dash'),
+            fill='tonexty'
+        ), row=1, col=1)
+    
+    # Volume
+    colors = ['red' if row['Open'] > row['Close'] else 'green' 
+             for _, row in df.iterrows()]
+    fig.add_trace(go.Bar(
+        x=df.index, y=df['Volume'], name='Volume',
+        marker_color=colors, opacity=0.7
+    ), row=2, col=1)
+    
+    # RSI
+    fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], name='RSI'), row=3, col=1)
+    fig.add_hline(y=70, line_dash="dash", line_color="red", row=3, col=1)
+    fig.add_hline(y=30, line_dash="dash", line_color="green", row=3, col=1)
+    fig.add_hline(y=50, line_dash="dot", line_color="grey", row=3, col=1)
+    
+    # MACD
+    fig.add_trace(go.Scatter(x=df.index, y=df['MACD'], name='MACD'), row=4, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['MACD_Signal'], name='Signal'), row=4, col=1)
+    
+    fig.update_layout(
+        title=f'{symbol} - Comprehensive Technical Analysis',
+        height=800,
+        showlegend=True,
+        xaxis_rangeslider_visible=False
+    )
+    
+    return fig
+
+# Enhanced prediction engine
+class EnhancedPredictionEngine:
+    def __init__(self):
+        self.learner = BG_LEARNER
+        
+    def generate_comprehensive_prediction(self, symbol: str, df: pd.DataFrame, days: int) -> Dict:
+        """Generate comprehensive prediction with multiple models"""
+        try:
+            # Get AI prediction
+            ai_pred, ai_confidence = self.learner.predict_stock(symbol, df, days)
+            
+            # Technical prediction
+            tech_pred = self._technical_prediction(df, days)
+            
+            # Momentum prediction
+            momentum_pred = self._momentum_prediction(df, days)
+            
+            # Combine predictions
+            current_price = df['Close'].iloc[-1]
+            final_pred = self._combine_predictions(
+                ai_pred, tech_pred, momentum_pred, 
+                ai_confidence, current_price, days
+            )
+            
+            # Generate targets and levels
+            targets = self._calculate_targets(current_price, final_pred, df)
+            support_resistance = self._calculate_support_resistance(df)
+            
+            return {
+                'current_price': current_price,
+                'predicted_price': final_pred,
+                'predicted_return': ((final_pred - current_price) / current_price) * 100,
+                'targets': targets,
+                'support_resistance': support_resistance,
+                'confidence': ai_confidence,
+                'signal': self._generate_signal(final_pred, current_price, df),
+                'time_horizon': f"{days} days"
+            }
+            
+        except Exception as e:
+            st.error(f"Prediction error: {str(e)}")
+            return None
+    
+    def _technical_prediction(self, df: pd.DataFrame, days: int) -> float:
+        """Technical analysis based prediction"""
+        current_price = df['Close'].iloc[-1]
+        
+        # Trend analysis
+        trend_strength = self._calculate_trend_strength(df)
+        
+        # Momentum analysis
+        momentum = self._calculate_momentum(df)
+        
+        # Volatility adjustment
+        volatility = df['Close'].pct_change().std() * np.sqrt(252)
+        
+        predicted_change = (trend_strength * 0.6 + momentum * 0.4) * np.sqrt(days/30)
+        predicted_change = max(-0.3, min(0.3, predicted_change))  # Cap at ±30%
+        
+        return current_price * (1 + predicted_change)
+    
+    def _momentum_prediction(self, df: pd.DataFrame, days: int) -> float:
+        """Momentum-based prediction"""
+        current_price = df['Close'].iloc[-1]
+        
+        # Short-term momentum (5 days)
+        mom_5d = (current_price - df['Close'].iloc[-5]) / df['Close'].iloc[-5]
+        
+        # Medium-term momentum (20 days)
+        mom_20d = (current_price - df['Close'].iloc[-20]) / df['Close'].iloc[-20]
+        
+        # Volume confirmation
+        volume_trend = df['Volume'].iloc[-5:].mean() / df['Volume'].iloc[-20:].mean()
+        
+        momentum_score = (mom_5d * 0.6 + mom_20d * 0.4) * min(volume_trend, 2.0)
+        predicted_change = momentum_score * np.sqrt(days/7)
+        
+        return current_price * (1 + predicted_change)
+    
+    def _combine_predictions(self, ai_pred: float, tech_pred: float, 
+                           momentum_pred: float, confidence: float, 
+                           current_price: float, days: int) -> float:
+        """Intelligently combine different prediction methods"""
+        # Weight predictions based on confidence and market conditions
+        ai_weight = confidence / 100.0
+        tech_weight = 0.3 * (1 - ai_weight)
+        momentum_weight = 0.2 * (1 - ai_weight)
+        
+        # Normalize weights
+        total_weight = ai_weight + tech_weight + momentum_weight
+        ai_weight /= total_weight
+        tech_weight /= total_weight
+        momentum_weight /= total_weight
+        
+        combined = (ai_pred * ai_weight + 
+                   tech_pred * tech_weight + 
+                   momentum_pred * momentum_weight)
+        
+        return combined
+    
+    def _calculate_trend_strength(self, df: pd.DataFrame) -> float:
+        """Calculate overall trend strength"""
+        if len(df) < 50:
+            return 0.0
+            
+        # Multiple timeframe analysis
+        ma_ratios = []
+        for short, long in [(5, 20), (10, 50), (20, 100)]:
+            if f'MA{short}' in df.columns and f'MA{long}' in df.columns:
+                ratio = (df[f'MA{short}'].iloc[-1] / df[f'MA{long}'].iloc[-1]) - 1
+                ma_ratios.append(ratio)
+        
+        return np.mean(ma_ratios) if ma_ratios else 0.0
+    
+    def _calculate_momentum(self, df: pd.DataFrame) -> float:
+        """Calculate momentum score"""
+        if len(df) < 20:
+            return 0.0
+            
+        # RSI momentum
+        rsi_momentum = (df['RSI'].iloc[-1] - 50) / 50 if 'RSI' in df.columns else 0
+        
+        # Price momentum
+        returns = df['Close'].pct_change()
+        price_momentum = returns.tail(10).mean()
+        
+        # MACD momentum
+        macd_momentum = (df['MACD'].iloc[-1] - df['MACD'].iloc[-5]).mean() if 'MACD' in df.columns else 0
+        
+        return (rsi_momentum * 0.3 + price_momentum * 0.5 + macd_momentum * 0.2)
+    
+    def _calculate_targets(self, current_price: float, predicted_price: float, df: pd.DataFrame) -> Dict:
+        """Calculate realistic price targets"""
+        volatility = df['Close'].pct_change().std() * np.sqrt(252)
+        price_change = (predicted_price - current_price) / current_price
+        
+        # Conservative target scaling based on volatility
+        if volatility > 0.4:  # High volatility
+            multipliers = [0.3, 0.6, 0.8, 1.0]
+        elif volatility > 0.2:  # Medium volatility
+            multipliers = [0.4, 0.7, 0.9, 1.0]
+        else:  # Low volatility
+            multipliers = [0.5, 0.8, 0.95, 1.0]
+        
+        targets = {}
+        for i, mult in enumerate(multipliers, 1):
+            target_price = current_price + (predicted_price - current_price) * mult
+            targets[f'target_{i}'] = {
+                'price': round(target_price, 2),
+                'return': round(((target_price - current_price) / current_price) * 100, 2)
+            }
+        
+        return targets
+    
+    def _calculate_support_resistance(self, df: pd.DataFrame) -> Dict:
+        """Calculate dynamic support and resistance levels"""
+        if len(df) < 20:
+            return {}
+            
+        recent_high = df['High'].tail(20).max()
+        recent_low = df['Low'].tail(20).min()
+        current_price = df['Close'].iloc[-1]
+        
+        # Fibonacci levels
+        fib_236 = recent_high - (recent_high - recent_low) * 0.236
+        fib_382 = recent_high - (recent_high - recent_low) * 0.382
+        fib_500 = recent_high - (recent_high - recent_low) * 0.5
+        fib_618 = recent_high - (recent_high - recent_low) * 0.618
+        
+        return {
+            'resistance_1': round(recent_high, 2),
+            'resistance_2': round(fib_236, 2),
+            'support_1': round(recent_low, 2),
+            'support_2': round(fib_618, 2),
+            'pivot': round((recent_high + recent_low + current_price) / 3, 2)
+        }
+    
+    def _generate_signal(self, predicted_price: float, current_price: float, df: pd.DataFrame) -> str:
+        """Generate trading signal"""
+        predicted_return = (predicted_price - current_price) / current_price * 100
+        
+        # Technical confirmation
+        rsi = df['RSI'].iloc[-1] if 'RSI' in df.columns else 50
+        ma_signal = "BULLISH" if current_price > df['MA20'].iloc[-1] else "BEARISH"
+        
+        if predicted_return >= 15 and rsi < 70 and ma_signal == "BULLISH":
+            return "STRONG BUY"
+        elif predicted_return >= 8:
+            return "BUY"
+        elif predicted_return <= -15 and rsi > 30 and ma_signal == "BEARISH":
+            return "STRONG SELL"
+        elif predicted_return <= -8:
+            return "SELL"
+        elif abs(predicted_return) < 3:
+            return "HOLD"
         else:
-            for i, r in enumerate(recs_sorted, 1):
-                st.markdown(f"**{i}. {r['ticker']}**  \n- Est (7d): {r['pred_pct_7d']:+.2f}%  \n- Entry: ₹{r['entry']:.2f}  \n- Targets: ₹{r['targets'][0]:.2f}, ₹{r['targets'][1]:.2f}, ₹{r['targets'][2]:.2f}, ₹{r['targets'][3]:.2f}  \n- Stop: ₹{r['stop_loss']:.2f}  \n- Est RR: 1:{r['rr']:.2f}  \n- Model conf: {r['conf']:.2f}")
-                st.divider()
+            return "NEUTRAL"
+
+# Main analysis function
+def run_comprehensive_analysis():
+    """Run comprehensive stock analysis"""
+    # Map timeframe
+    timeframe_map = {
+        "1 Week": "5d", "1 Month": "1mo", "3 Months": "3mo",
+        "6 Months": "6mo", "1 Year": "1y", "2 Years": "2y", "5 Years": "5y"
+    }
+    
+    period = timeframe_map.get(timeframe, "6mo")
+    
+    # Fetch data
+    with st.spinner("🔄 Fetching real-time data..."):
+        hist, info, ticker = fetch_stock_data(stock_symbol, period)
+        
+    if hist is None or hist.empty:
+        st.error("❌ Could not fetch stock data. Please check the symbol and try again.")
+        return
+    
+    # Calculate indicators
+    hist = calculate_enhanced_indicators(hist)
+    company_name = info.get('longName', info.get('shortName', stock_symbol))
+    
+    # Display real-time price
+    current_price = PRICE_TRACKER.get_current_price(stock_symbol)
+    if current_price:
+        st.success(f"📊 **Real-time Price for {company_name}: ₹{current_price:.2f}**")
+    
+    # Company overview
+    st.header(f"🏢 {company_name} Analysis")
+    
+    # Key metrics in columns
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    with col1:
+        current_price = hist['Close'].iloc[-1]
+        prev_close = hist['Close'].iloc[-2] if len(hist) > 1 else current_price
+        change = current_price - prev_close
+        change_pct = (change / prev_close) * 100
+        st.metric("Current Price", f"₹{current_price:.2f}", 
+                 f"{change:+.2f} ({change_pct:+.2f}%)")
+    
+    with col2:
+        day_high = hist['High'].iloc[-1]
+        st.metric("Day High", f"₹{day_high:.2f}")
+    
+    with col3:
+        day_low = hist['Low'].iloc[-1]
+        st.metric("Day Low", f"₹{day_low:.2f}")
+    
+    with col4:
+        volume = hist['Volume'].iloc[-1]
+        st.metric("Volume", f"{volume:,.0f}")
+    
+    with col5:
+        market_cap = info.get('marketCap')
+        if market_cap:
+            st.metric("Market Cap", f"₹{market_cap/1e7:.0f} Cr")
+        else:
+            st.metric("Volatility", f"{hist['Volatility'].iloc[-1]:.1f}%")
+    
+    # Technical chart
+    st.plotly_chart(create_enhanced_chart(hist, stock_symbol), use_container_width=True)
+    
+    # AI Prediction Section
+    st.header("🤖 AI Prediction & Recommendations")
+    
+    prediction_engine = EnhancedPredictionEngine()
+    with st.spinner("🧠 Generating AI predictions..."):
+        prediction = prediction_engine.generate_comprehensive_prediction(
+            stock_symbol, hist, pred_days
+        )
+    
+    if prediction:
+        # Prediction results
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            signal_class = {
+                "STRONG BUY": "buy-signal", "BUY": "buy-signal",
+                "STRONG SELL": "sell-signal", "SELL": "sell-signal",
+                "HOLD": "hold-signal", "NEUTRAL": "hold-signal"
+            }.get(prediction['signal'], 'prediction-box')
+            
+            st.markdown(f"""
+            <div class="prediction-box {signal_class}">
+                <h3>🎯 AI Recommendation: {prediction['signal']}</h3>
+                <h2>₹{prediction['predicted_price']:.2f}</h2>
+                <p style="font-size:16px; color:{'green' if prediction['predicted_return'] > 0 else 'red'}">
+                    {prediction['predicted_return']:+.2f}% in {prediction['time_horizon']}
+                </p>
+                <p style="font-size:14px;">Confidence: {prediction['confidence']:.1f}%</p>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with col2:
+            # Trading plan
+            st.markdown("""
+            <div class="prediction-box">
+                <h3>💰 Trading Plan</h3>
+            """, unsafe_allow_html=True)
+            
+            for i, target in enumerate(prediction['targets'].values(), 1):
+                st.write(f"**Target {i}:** ₹{target['price']:.2f} ({target['return']:+.1f}%)")
+            
+            st.write("---")
+            st.write("**Support Levels:**")
+            for key, value in list(prediction['support_resistance'].items())[2:]:
+                st.write(f"- {key.replace('_', ' ').title()}: ₹{value:.2f}")
+            
+            st.write("**Resistance Levels:**")
+            for key, value in list(prediction['support_resistance'].items())[:2]:
+                st.write(f"- {key.replace('_', ' ').title()}: ₹{value:.2f}")
+            
+            st.markdown("</div>", unsafe_allow_html=True)
+    
+    # Fundamental Analysis
+    if "Fundamental" in analysis_type:
+        st.header("📊 Fundamental Analysis")
+        fundamental_data = FUNDAMENTAL_ANALYZER.analyze(stock_symbol, info)
+        
+        if fundamental_data:
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.subheader("Valuation")
+                for metric, value in fundamental_data.get('valuation', {}).items():
+                    st.metric(metric, value)
+            
+            with col2:
+                st.subheader("Profitability")
+                for metric, value in fundamental_data.get('profitability', {}).items():
+                    st.metric(metric, value)
+            
+            with col3:
+                st.subheader("Financial Health")
+                for metric, value in fundamental_data.get('health', {}).items():
+                    st.metric(metric, value)
+    
+    # Technical Analysis Details
+    if "Technical" in analysis_type:
+        st.header("📈 Technical Analysis")
+        
+        tech_col1, tech_col2, tech_col3, tech_col4 = st.columns(4)
+        
+        with tech_col1:
+            rsi = hist['RSI'].iloc[-1]
+            rsi_status = "Overbought" if rsi > 70 else "Oversold" if rsi < 30 else "Neutral"
+            st.metric("RSI (14)", f"{rsi:.1f}", rsi_status)
+        
+        with tech_col2:
+            macd = hist['MACD'].iloc[-1]
+            macd_signal = hist['MACD_Signal'].iloc[-1]
+            macd_trend = "Bullish" if macd > macd_signal else "Bearish"
+            st.metric("MACD", f"{macd:.3f}", macd_trend)
+        
+        with tech_col3:
+            ma_trend = "Bullish" if hist['Close'].iloc[-1] > hist['MA50'].iloc[-1] else "Bearish"
+            st.metric("Trend (MA50)", ma_trend)
+        
+        with tech_col4:
+            volatility = hist['Volatility'].iloc[-1]
+            vol_level = "High" if volatility > 40 else "Medium" if volatility > 20 else "Low"
+            st.metric("Volatility", f"{volatility:.1f}%", vol_level)
+    
+    # Risk Analysis
+    if "Risk" in analysis_type:
+        st.header("⚠️ Risk Analysis")
+        
+        risk_score = BG_LEARNER.calculate_risk_score(stock_symbol, hist)
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.metric("Overall Risk Score", f"{risk_score:.1f}/10")
+            
+            # Risk factors
+            st.write("**Risk Factors:**")
+            if risk_score > 7:
+                st.error("High Risk - Consider careful position sizing")
+            elif risk_score > 5:
+                st.warning("Medium Risk - Monitor closely")
+            else:
+                st.success("Low Risk - Favorable conditions")
+        
+        with col2:
+            st.write("**Risk Mitigation:**")
+            st.write("- Use appropriate stop-loss")
+            st.write("- Diversify portfolio")
+            st.write("- Monitor key support levels")
+    
+    # Final Recommendation
+    st.header("🎯 Final Conclusion")
+    
+    conclusion_col1, conclusion_col2 = st.columns([2, 1])
+    
+    with conclusion_col1:
+        if prediction:
+            st.write(f"**AI Analysis Summary for {company_name}:**")
+            st.write(f"- **Predicted Movement:** {prediction['predicted_return']:+.2f}% in {prediction['time_horizon']}")
+            st.write(f"- **Confidence Level:** {prediction['confidence']:.1f}%")
+            st.write(f"- **Recommended Action:** {prediction['signal']}")
+            st.write(f"- **Key Support:** ₹{prediction['support_resistance']['support_1']:.2f}")
+            st.write(f"- **Key Resistance:** ₹{prediction['support_resistance']['resistance_1']:.2f}")
+    
+    with conclusion_col2:
+        # Quick sentiment indicator
+        sentiment_score = BG_LEARNER.get_sentiment_score(stock_symbol)
+        st.metric("Market Sentiment", f"{sentiment_score:.1f}/10")
+        
+        if sentiment_score > 7:
+            st.success("Bullish Sentiment")
+        elif sentiment_score > 4:
+            st.info("Neutral Sentiment")
+        else:
+            st.warning("Bearish Sentiment")
+
+# Real-time data display
+def show_realtime_data():
+    """Display real-time stock data"""
+    st.header("📊 Live Market Data")
+    
+    current_price = PRICE_TRACKER.get_current_price(stock_symbol)
+    if current_price:
+        st.success(f"**Live Price for {stock_symbol}: ₹{current_price:.2f}**")
+    
+    # Placeholder for real-time chart updates
+    st.info("Real-time chart updates would be implemented here with WebSocket connections")
+
+# Main application logic
+def main():
+    """Main application controller"""
+    
+    # Start background learner if not already running
+    if not BG_LEARNER.is_running():
+        BG_LEARNER.start()
+    
+    # Handle button actions
+    if realtime_btn:
+        show_realtime_data()
+    elif analyze_btn or "auto_analyzed" not in st.session_state:
+        st.session_state.auto_analyzed = True
+        run_comprehensive_analysis()
+    else:
+        # Default view
+        st.info("👆 Click 'Analyze' to start comprehensive stock analysis or 'Live Data' for real-time updates")
+        
+        # Show recent high-performing stocks
+        st.header("🚀 Recent High-Performers")
+        try:
+            performers = BG_LEARNER.get_recent_performers()
+            for perf in performers[:3]:
+                st.write(f"**{perf['symbol']}**: {perf['return']:.1f}% return | Confidence: {perf['confidence']:.1f}%")
+        except:
+            st.write("Performance data loading...")
 
 # Footer
 st.divider()
 st.markdown("""
-<div style="text-align:center;color:#666;">
-    <p>JINNI - AI Stock Analysis System for Indian Markets</p>
-    <p>BackgroundLearnerV2: ensemble online models (persisted to bg_v2.pkl). Tune hyperparams and expand universe for better results.</p>
-    <p>⚠️ Disclaimer: Educational purposes only. Not financial advice. Backtest before trading real capital.</p>
+<div style="text-align:center;color:#666;font-size:0.9rem;">
+    <p><strong>JINNI AI Stock Analysis System</strong> - Advanced Machine Learning for Indian Markets</p>
+    <p>⚠️ <em>Disclaimer: This is for educational purposes only. Not financial advice. Always do your own research.</em></p>
+    <p>🔄 <em>Real-time learning active. Model accuracy improves continuously.</em></p>
 </div>
 """, unsafe_allow_html=True)
 
-# Trigger analysis (auto-run once, or on button)
-if analyze_btn:
-    run_analysis()
-elif "auto_run_done" not in st.session_state:
-    st.session_state["auto_run_done"] = True
-    run_analysis()
+if __name__ == "__main__":
+    main()
