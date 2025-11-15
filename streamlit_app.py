@@ -37,6 +37,7 @@ def init_db():
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS scan_log(
+    
         scan_date TEXT,
         total_scanned INT,
         bullish INT,
