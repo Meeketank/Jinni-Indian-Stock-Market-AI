@@ -606,7 +606,7 @@ if "BG" not in st.session_state:
 BG = st.session_state.BG
 
 # Initialize enterprise Aladdin-competitive modules
-if ENTERPRISE_MODULES_AVAILE:
+if ENTERPRISE_MODULES_AVAILABLE:
     if "storage" not in st.session_state:
         st.session_state.storage = FirebaseManager()
         print("✅ Storage manager initialized")
