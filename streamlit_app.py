@@ -20,6 +20,18 @@ import threading, time, os, pickle, random, math, json, requests
 from datetime import datetime, timedelta
 from typing import List, Tuple, Dict
 
+# ---- ENTERPRISE ALADDIN-COMPETITIVE MODULES ----
+try:
+    from firebase_config import FirebaseManager
+    from recommendation_engine import RecommendationEngine
+    from advanced_models import AdvancedEnsembleModel
+    from risk_analytics import RiskAnalytics
+    from automated_retraining import AutomatedRetrainingSystem
+    ENTERPRISE_MODULES_AVAILABLE = True
+except ImportError as e:
+    print(f"Enterprise modules not available: {e}")
+    ENTERPRISE_MODULES_AVAILABLE = False
+
 # ---- CONFIG ----
 APP_DIR = os.path.abspath(".")
 CACHE_DIR = os.path.join(APP_DIR, ".jinni_cache")
@@ -592,6 +604,29 @@ if "BG" not in st.session_state:
         log_error(f"BG.start error: {e}")
 
 BG = st.session_state.BG
+
+# Initialize enterprise Aladdin-competitive modules
+if ENTERPRISE_MODULES_AVAILABLE:
+    if "firebase" not in st.session_state:
+        st.session_state.firebase = FirebaseManager()
+    
+    if "rec_engine" not in st.session_state:
+        st.session_state.rec_engine = RecommendationEngine(st.session_state.firebase)
+    
+    if "ensemble_model" not in st.session_state:
+        st.session_state.ensemble_model = AdvancedEnsembleModel()
+    
+    if "risk_analytics" not in st.session_state:
+        st.session_state.risk_analytics = RiskAnalytics()
+    
+    if "auto_retrain" not in st.session_state:
+        st.session_state.auto_retrain = AutomatedRetrainingSystem(
+            firebase_manager=st.session_state.firebase
+        )
+        try:
+            st.session_state.auto_retrain.start_monitoring()
+        except Exception as e:
+            log_error(f"Auto-retrain start error: {e}")
 
 # Sidebar controls
 with st.sidebar:
