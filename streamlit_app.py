@@ -17,6 +17,7 @@ DB_PATH = 'jinni_market_data.db'
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+     c.execute('DROP TABLE IF EXISTS analysis')
     c.execute('''
     CREATE TABLE IF NOT EXISTS analysis(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
