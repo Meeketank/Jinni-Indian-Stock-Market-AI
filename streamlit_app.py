@@ -44,6 +44,20 @@ def init_db():
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )
     ''')
+    # scan_log will be created dynamically if needed but create here as well
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS scan_log(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scan_date TEXT,
+            total_scanned INT,
+            bullish INT,
+            bearish INT,
+            neutral INT,
+            min_expected_pct REAL,
+            direction TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
     conn.commit()
     conn.close()
 
@@ -96,8 +110,6 @@ def calc_atr(df: pd.DataFrame, period: int = 14):
 
 # Basic pattern detectors
 def detect_golden_death(ma_short, ma_long):
-    # Return latest cross status and when it crossed
-    cross = None
     if len(ma_short) < 2 or len(ma_long) < 2:
         return "Insufficient data"
     prev = ma_short[-2] - ma_long[-2]
@@ -109,7 +121,6 @@ def detect_golden_death(ma_short, ma_long):
     return "No recent cross"
 
 def detect_double_top_bottom(close, window=60):
-    # naive approach: find two local peaks/troughs in sliding window
     series = close[-window:]
     if len(series) < 20:
         return "Insufficient data"
@@ -117,10 +128,8 @@ def detect_double_top_bottom(close, window=60):
     troughs = (series.shift(1) > series) & (series.shift(-1) > series)
     peak_dates = series.index[peaks].tolist()
     trough_dates = series.index[troughs].tolist()
-    # Double top: two peaks at similar price within window
     if len(peak_dates) >= 2:
         p = series.loc[peak_dates]
-        # check similar price
         if abs(p.iloc[-1] - p.iloc[-2]) / p.iloc[-2] < 0.03:
             return "Possible Double Top"
     if len(trough_dates) >= 2:
@@ -135,7 +144,8 @@ def detect_higher_highs_lows(close, lookback=20):
         return "Insufficient data"
     highs = s.rolling(5).max().dropna()
     lows = s.rolling(5).min().dropna()
-    # simple heuristic: compare last to previous
+    if len(highs) < 2 or len(lows) < 2:
+        return "Insufficient data"
     if highs.iloc[-1] > highs.iloc[-2] and lows.iloc[-1] > lows.iloc[-2]:
         return "Uptrend (higher highs & higher lows)"
     if highs.iloc[-1] < highs.iloc[-2] and lows.iloc[-1] < lows.iloc[-2]:
@@ -152,8 +162,6 @@ def detect_volume_spike(volume, multiplier=3):
 
 # ----------------- Analysis engine -----------------
 def compute_targets_and_stops(price, atr, direction):
-    # Tiered targets using ATR multipliers
-    # Conservative to aggressive
     if atr <= 0 or price <= 0:
         return [price, price, price, price], price * 0.98
     if direction == 'UP':
@@ -169,7 +177,6 @@ def compute_targets_and_stops(price, atr, direction):
         t4 = price - atr * 6.0
         sl = price + atr * 1.25
     else:
-        # neutral: small bands
         t1 = price + atr * 0.5
         t2 = price + atr * 1.0
         t3 = price + atr * 1.5
@@ -210,7 +217,6 @@ def analyze_full(symbol):
     div_yield = info.get('dividendYield') or 0.0
     market_cap = info.get('marketCap') or np.nan
     sector = info.get('sector') or info.get('industry') or 'N/A'
-    # simple fundamental score
     pe_score = 20 if (np.isfinite(pe) and pe < 30) else (10 if np.isfinite(pe) else 12)
     pb_score = 15 if (np.isfinite(pb) and pb < 5) else 8
     div_score = 10 if div_yield and div_yield > 0 else 0
@@ -241,7 +247,6 @@ def analyze_full(symbol):
     pattern_summary = f"{gd_cross} | {double} | {hhll} | {vol_spike}"
 
     # Final recommendation text
-    recommendation = ""
     if avg_score >= 75:
         recommendation = f"STRONG {direction}"
     elif avg_score >= 60:
@@ -339,7 +344,7 @@ col1, col2 = st.columns([3,1])
 with col1:
     symbol = st.text_input('Enter symbol (append .NS if needed)', 'TCS.NS')
 with col2:
-    run_analysis = st.button('🔍 Analyze & Plot')
+    run_analysis = st.button('📊 Analyze & Plot')
 
 if run_analysis:
     with st.spinner('Fetching data and analyzing...'):
@@ -461,6 +466,112 @@ if run_analysis:
         except Exception as e:
             st.warning(f'Could not save to DB: {e}')
 
+# ----------------- Market Recommender / Scanner -----------------
+st.header('🔍 Market Recommender - Scan by expected % move')
+
+with st.expander('Scanner settings (click to expand)', expanded=False):
+    min_expected_pct = st.number_input('Minimum expected % move (from current price to Target1)', min_value=0.1, max_value=100.0, value=3.0, step=0.1, help="Show stocks whose Target1 is at least this % away from current price")
+    scan_direction = st.selectbox('Direction to look for', options=['UP','DOWN','EITHER'], index=2)
+    symbols_text = st.text_area('Symbols (comma-separated). Leave blank to use default sample NSE list.', 
+                                value='RELIANCE.NS,TCS.NS,INFY.NS,HINDUNILVR.NS,SBIN.NS,ICICIBANK.NS,HDFC.NS,MARUTI.NS,BAJAJFINSV.NS,LT.NS,ASIANPAINT.NS,WIPRO.NS,AXISBANK.NS,DMART.NS')
+    throttle_ms = st.number_input('Delay between requests (ms) to avoid rate limits', value=150, min_value=50, max_value=2000, step=50)
+
+scan_button = st.button('🔎 Run Market Scan')
+
+def insert_scan_log_row(total, bullish, bearish, neutral, min_pct, direction):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('INSERT INTO scan_log (scan_date,total_scanned,bullish,bearish,neutral,min_expected_pct,direction) VALUES (?,?,?,?,?,?,?)',
+              (datetime.now().strftime('%Y-%m-%d'), total, bullish, bearish, neutral, float(min_pct), direction))
+    conn.commit()
+    conn.close()
+
+if scan_button:
+    raw = symbols_text.strip()
+    if raw == '':
+        st.warning('No symbols provided. Please paste a list or use default sample.')
+    else:
+        symbol_list = [s.strip().upper() for s in raw.split(',') if s.strip()]
+        if not symbol_list:
+            st.warning('Symbol list empty after parsing.')
+        else:
+            st.info(f'Scanning {len(symbol_list)} symbols — min expected {min_expected_pct:.2f}% — direction {scan_direction}')
+            progress = st.progress(0)
+            status = st.empty()
+            results = []
+            for i, sym in enumerate(symbol_list):
+                status.info(f'Scanning {i+1}/{len(symbol_list)}: {sym}')
+                try:
+                    res = analyze_full(sym)
+                    if res is None:
+                        time.sleep(throttle_ms/1000.0)
+                        progress.progress((i+1)/len(symbol_list))
+                        continue
+
+                    price = res['price']
+                    target1 = res['targets'][0]
+                    if res['direction'] == 'UP':
+                        expected_pct = (target1 - price) / price * 100.0
+                    elif res['direction'] == 'DOWN':
+                        expected_pct = (price - target1) / price * 100.0
+                    else:
+                        expected_pct = abs((target1 - price) / price * 100.0)
+
+                    qualifies = False
+                    if scan_direction == 'EITHER':
+                        qualifies = expected_pct >= min_expected_pct
+                    elif scan_direction == 'UP':
+                        qualifies = (res['direction'] == 'UP') and (expected_pct >= min_expected_pct)
+                    elif scan_direction == 'DOWN':
+                        qualifies = (res['direction'] == 'DOWN') and (expected_pct >= min_expected_pct)
+
+                    if qualifies:
+                        row = {
+                            'symbol': res['sym'],
+                            'price': res['price'],
+                            'direction': res['direction'],
+                            'expected_pct': expected_pct,
+                            'confidence': res['confidence'],
+                            'technical_score': res['technical_score'],
+                            'fundamental_score': res['fundamental_score'],
+                            'momentum_score': res['momentum_score'],
+                            'target1': res['targets'][0],
+                            'target2': res['targets'][1],
+                            'target3': res['targets'][2],
+                            'target4': res['targets'][3],
+                            'stop_loss': res['stop_loss'],
+                            'final_statement': res['final_statement']
+                        }
+                        results.append(row)
+
+                    try:
+                        save_analysis_to_db(res)
+                    except Exception as e:
+                        st.warning(f'Could not save analysis for {sym}: {e}')
+
+                except Exception as e:
+                    st.error(f'Error scanning {sym}: {e}')
+                time.sleep(throttle_ms/1000.0)
+                progress.progress((i+1)/len(symbol_list))
+
+            if results:
+                df_results = pd.DataFrame(results).sort_values(['expected_pct','confidence'], ascending=[False, False]).reset_index(drop=True)
+                st.success(f'Found {len(df_results)} symbols matching criteria (min {min_expected_pct}%).')
+                st.dataframe(df_results[['symbol','price','direction','expected_pct','confidence','technical_score','fundamental_score','target1','stop_loss']].round(3), use_container_width=True)
+
+                bullish = sum(1 for r in results if r['direction']=='UP')
+                bearish = sum(1 for r in results if r['direction']=='DOWN')
+                neutral = len(results) - bullish - bearish
+                colA, colB, colC = st.columns(3)
+                colA.metric('📈 Bullish', bullish)
+                colB.metric('📉 Bearish', bearish)
+                colC.metric('⏸️ Neutral', neutral)
+
+                insert_scan_log_row(len(symbol_list), bullish, bearish, neutral, min_expected_pct, scan_direction)
+            else:
+                st.info('No symbols matched the criteria.')
+                insert_scan_log_row(len(symbol_list), 0, 0, 0, min_expected_pct, scan_direction)
+
 # ----------------- History / Portfolio -----------------
 st.sidebar.header('History & Saved Analyses')
 if st.sidebar.button('Show recent saved analyses'):
@@ -476,4 +587,4 @@ st.sidebar.markdown('---')
 st.sidebar.write('Notes:')
 st.sidebar.write('- Targets use ATR multipliers (conservative → aggressive).')
 st.sidebar.write('- Pattern detectors are heuristic: for production you must backtest pattern signals.')
-st.sidebar.write('- For institutional-level analytics (BlackRock Aladdin) you need tick-level data, risk models, factor exposures, and governance.')
+st.sidebar.write('- Keep your symbol list updated. If you want full NSE/BSE, replace the symbols_text default with your full list.')
