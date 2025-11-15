@@ -28,10 +28,10 @@ try:
     from risk_analytics import RiskAnalytics
     from automated_retraining import AutomatedRetrainingSystem
     ENTERPRISE_MODULES_AVAILABLE = True
+    print("✅ Enterprise modules loaded successfully!")
 except ImportError as e:
-    print(f"Enterprise modules not available: {e}")
+    print(f"❌ Enterprise modules failed to load: {e}")
     ENTERPRISE_MODULES_AVAILABLE = False
-
 # ---- CONFIG ----
 APP_DIR = os.path.abspath(".")
 CACHE_DIR = os.path.join(APP_DIR, ".jinni_cache")
@@ -607,27 +607,31 @@ BG = st.session_state.BG
 
 # Initialize enterprise Aladdin-competitive modules
 if ENTERPRISE_MODULES_AVAILABLE:
-    if "firebase" not in st.session_state:
-        st.session_state.firebase = FirebaseManager()
+        if "storage" not in st.session_state:
+        st.session_state.storage = FirebaseManager()
+        print("✅ Storage manager initialized")
     
     if "rec_engine" not in st.session_state:
-        st.session_state.rec_engine = RecommendationEngine(st.session_state.firebase)
+        st.session_state.rec_engine = RecommendationEngine(st.session_state.storage)
+        print("✅ Recommendation engine initialized")
     
     if "ensemble_model" not in st.session_state:
         st.session_state.ensemble_model = AdvancedEnsembleModel()
+        print("✅ Ensemble model initialized")
     
     if "risk_analytics" not in st.session_state:
         st.session_state.risk_analytics = RiskAnalytics()
+        print("✅ Risk analytics initialized")
     
     if "auto_retrain" not in st.session_state:
         st.session_state.auto_retrain = AutomatedRetrainingSystem(
-            firebase_manager=st.session_state.firebase
+            storage_manager=st.session_state.storage
         )
         try:
             st.session_state.auto_retrain.start_monitoring()
+            print("✅ Autonomous retraining started")
         except Exception as e:
             log_error(f"Auto-retrain start error: {e}")
-
 # Sidebar controls
 with st.sidebar:
     st.header("Controls")
