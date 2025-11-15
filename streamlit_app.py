@@ -16,6 +16,10 @@ DB_PATH = 'jinni_market_data.db'
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()    
+        try:
+        c.execute('DROP TABLE analysis')
+    except:
+        pass
     c.execute('''CREATE TABLE IF NOT EXISTS analysis(
         id INTEGER PRIMARY KEY,
         symbol TEXT,
