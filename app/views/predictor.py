@@ -8,7 +8,8 @@ import streamlit as st
 from app import components as ui
 from app import storage
 from app.theme import BLUE, DOWN, GOLD, MUTED, UP
-from jinni import events, forecast as fc, riskcheck as rc, risk, setups
+from jinni import data as jdata
+from jinni import events, forecast as fc, market, riskcheck as rc, risk, setups
 from jinni.universe import BENCHMARK, NIFTY50, display_name, normalize_symbol, sector_of
 
 st.title("Return Finder")
@@ -37,14 +38,35 @@ with st.container(border=True):
         stop_fixed = None
         if stop_mode == "Fixed %":
             stop_fixed = st.number_input("Stop %", 0.5, 50.0, 3.0, 0.5) / 100
-        universe = st.selectbox("Search in", ["NIFTY 50", "My holdings", "Watchlist", "Custom list"])
+        universe = st.selectbox("Search in", ["Entire NSE market (all listed stocks)", "NIFTY 50", "My holdings",
+                                              "Watchlist", "Custom list"], index=1)
         custom = ""
         if universe == "Custom list":
             custom = st.text_input("Symbols", "IRCTC, HAL, BEL, POLYCAB, DIXON, TATAELXSI, TRENT, ZYDUSLIFE")
         use_ml = st.toggle("Include ML engine (slower, more thorough)", value=True)
+    b1_, b2_, b3_ = st.columns(3)
+    with b1_:
+        budget = st.number_input("My budget (₹, 0 = no limit)", 0.0, 1e10, 0.0, 500.0, format="%.0f",
+                                 help="Only stocks you can afford at least one share of are considered, and JINNI "
+                                      "builds a whole-share plan for this amount.")
+    with b2_:
+        max_names = st.slider("Max stocks to split it across", 1, 5, 3)
+    with b3_:
+        deep_n = st.slider("Market scan: deep-analyse top", 20, 150, 60, 10,
+                           help="Stage 1 screens every listed stock; the best N go through all three engines.",
+                           disabled=not universe.startswith("Entire"))
+    with st.expander("Market-scan filters", icon=":material/tune:"):
+        f1_, f2_, f3_ = st.columns(3)
+        min_px = f1_.number_input("Min price ₹", 1.0, 1000.0, 20.0, 5.0)
+        min_val = f2_.number_input("Min daily traded value (₹ Cr)", 0.05, 100.0, 1.0, 0.25,
+                                   help="Filters out thin stocks where you can't get in or out at the shown price.")
+        sme = f3_.toggle("Include SME board", value=False)
+        up_csv = st.file_uploader("Optional: upload NSE EQUITY_L.csv to override the stock list", type="csv")
     go_btn = st.button("Find opportunities", type="primary", icon=":material/search:", width="stretch")
 
-if universe == "NIFTY 50":
+if universe.startswith("Entire"):
+    tickers = ["__MARKET__"]
+elif universe == "NIFTY 50":
     tickers = list(NIFTY50)
 elif universe == "My holdings":
     tickers = list(st.session_state.get("holdings", storage.load_holdings())["ticker"])
@@ -82,13 +104,39 @@ def run_finder(tickers: tuple, horizon: int, target: float, stop_mode: str, stop
     return out, act, ml, ml_err, base, pdata.source
 
 
-key = (tuple(tickers), horizon, target, stop_mode, stop_fixed, use_ml)
+funnel = None
 if go_btn:
     if not tickers:
         st.warning("No stocks to search. Add some to your list first.")
         st.stop()
+    if tickers == ["__MARKET__"]:
+        with st.status("Scanning the entire NSE market…", expanded=True) as status:
+            uni = market.demo_universe() if jdata.demo_forced() else \
+                market.nse_universe(include_sme=sme, override_csv=up_csv.getvalue() if up_csv else None)
+            st.write(f"Stock list: **{len(uni):,}** equities ({uni.attrs.get('source', '')}).")
+            bar = st.progress(0.0, "Downloading prices…")
+            try:
+                bulk = market.bulk_prices(uni["ticker"].tolist(), "2y", progress=lambda f, m: bar.progress(f, m))
+            except RuntimeError as e:
+                st.error(str(e))
+                st.stop()
+            pf = market.prefilter(bulk, budget or None, target, horizon, min_px, min_val)
+            ok = pf[pf["Excluded because"] == ""]
+            st.write(f"Stage 1: **{len(ok):,}** of {len(pf):,} pass price, liquidity, budget and data checks.")
+            reasons = pf.loc[pf["Excluded because"] != "", "Excluded because"].str.split("; ").explode().value_counts()
+            tickers = list(ok.index[:deep_n])
+            st.write(f"Stage 2: the top **{len(tickers)}** by quick odds go through all three engines…")
+            funnel = {"universe": len(uni), "source": uni.attrs.get("source", ""), "with_data": int(pf["History days"].gt(0).sum()),
+                      "passed": len(ok), "deep": len(tickers), "reasons": reasons.to_dict(), "missing": len(bulk.missing),
+                      "names": dict(zip(uni["ticker"], uni["name"]))}
+            status.update(label="Market scan: stage 1 done", state="complete")
+        if not tickers:
+            st.warning("No stock passed the filters. Try a bigger budget, lower liquidity filter or a longer horizon.")
+            st.stop()
+    key = (tuple(tickers), horizon, target, stop_mode, stop_fixed, use_ml)
     with st.spinner(f"Running {len(tickers)} stocks through 3 engines…"):
         st.session_state["finder"] = (key, run_finder(*key))
+        st.session_state["finder_extra"] = {"budget": budget, "max_names": max_names, "funnel": funnel}
 
 if "finder" not in st.session_state:
     ui.section("How it works")
@@ -112,6 +160,17 @@ if source == "demo":
 if not res:
     st.error("No stock had enough history (about 15 months needed).")
     st.stop()
+extra = st.session_state.get("finder_extra", {})
+budget_r, max_names_r, funnel = extra.get("budget", 0), extra.get("max_names", 3), extra.get("funnel")
+if funnel:
+    st.markdown(f"**Whole-market scan:** {funnel['universe']:,} listed → {funnel['passed']:,} passed filters → "
+                f"{funnel['deep']} deep-analysed. <span class='hint'>List: {funnel['source']}</span>",
+                unsafe_allow_html=True)
+    if funnel.get("missing"):
+        st.caption(f"{funnel['missing']:,} symbols returned no price data (delisted, suspended or rate-limited) "
+                   "and were skipped.")
+    if funnel["reasons"]:
+        st.caption("Filtered out: " + ", ".join(f"{k} ({v:,})" for k, v in funnel["reasons"].items()))
 
 rows = []
 for t, f in res.items():
@@ -182,6 +241,84 @@ with b2:
                 "grade": f.grade, "verdict": f.verdict, "qty": 0, "source": "finder-auto",
             })
         st.toast(f"Tracking {n} new predictions" if n else "No new A/B picks to track")
+
+# ------------------------------------------------------------- budget plan
+if budget_r and budget_r > 0:
+    ui.section(f"Your ₹{budget_r:,.0f} plan: +{target:.0%} within {hz_label}")
+    ranked = tbl[tbl["Price"] <= budget_r].sort_values("Exp. return", ascending=False)
+    good = ranked[ranked["Grade"].isin(["A", "B"])]
+    if ranked.empty:
+        st.warning("None of the analysed stocks costs less than your budget per share.")
+    else:
+        if good.empty:
+            st.warning(f"Honest answer: no stock shows a positive expected return for +{target:.0%} within {hz_label} "
+                       "after costs. The plan below uses the best of what's available, but the odds are against you. "
+                       "A smaller target or a longer window usually helps more than a different stock.",
+                       icon=":material/warning:")
+        pool = good if not good.empty else ranked
+        basket = fc.allocate_budget(pool, budget_r, max_names_r)
+        single = fc.allocate_budget(pool, budget_r, 1)
+        need = tuple(sorted(set(basket["ticker"]) | set(single["ticker"])))
+        bp = ui.prices(need + (BENCHMARK,), "5y")
+        bdfs = {t: bp.ohlcv(t) for t in need if t in bp.close}
+        stops_b = {t: res[t].stop_pct for t in need}
+        options = {}
+        for nm, al in (("Diversified basket", basket), ("Single best pick", single)):
+            if al.empty:
+                continue
+            try:
+                options[nm] = (al, fc.simulate_basket(bdfs, dict(zip(al["ticker"], al["Shares"])), horizon, target,
+                                                      stops_b, n_paths=4000))
+            except ValueError:
+                continue
+        if options:
+            cmp_rows = []
+            for nm, (al, sim_b) in options.items():
+                cmp_rows.append({"Plan": nm, "Stocks": len(al), "Invested ₹": sim_b["value"],
+                                 "Cash left ₹": al.attrs.get("cash", 0), f"P(basket ≥ +{target:.0%})": sim_b["p_reach"],
+                                 "P(loss)": sim_b["p_loss"], "Expected ₹": sim_b["exp"] * sim_b["value"],
+                                 "Bad case (5%) ₹": sim_b["p5"] * sim_b["value"],
+                                 "Good case (95%) ₹": sim_b["p95"] * sim_b["value"]})
+            st.dataframe(pd.DataFrame(cmp_rows).set_index("Plan"), width="stretch", column_config={
+                "Invested ₹": st.column_config.NumberColumn(format="₹%.0f"),
+                "Cash left ₹": st.column_config.NumberColumn(format="₹%.0f"),
+                f"P(basket ≥ +{target:.0%})": st.column_config.NumberColumn(format="percent"),
+                "P(loss)": st.column_config.NumberColumn(format="percent"),
+                "Expected ₹": st.column_config.NumberColumn(format="₹%+.0f"),
+                "Bad case (5%) ₹": st.column_config.NumberColumn(format="₹%+.0f"),
+                "Good case (95%) ₹": st.column_config.NumberColumn(format="₹%+.0f")})
+            pick_plan = st.radio("Show plan", list(options), horizontal=True)
+            al, sim_b = options[pick_plan]
+            plan_tbl = al.assign(Stock=al["ticker"].map(display_name),
+                                 Grade=al["ticker"].map(lambda t: res[t].grade),
+                                 **{"P(target first)": al["ticker"].map(lambda t: res[t].p_target),
+                                    "Target ₹": al["ticker"].map(lambda t: res[t].target_price),
+                                    "Stop ₹": al["ticker"].map(lambda t: res[t].stop_price)}).set_index("Stock")
+            st.dataframe(plan_tbl.drop(columns=["ticker"]), width="stretch", column_config={
+                "Price": st.column_config.NumberColumn(format="₹%.2f"),
+                "Invest ₹": st.column_config.NumberColumn(format="₹%.0f"),
+                "P(target first)": st.column_config.NumberColumn(format="percent"),
+                "Target ₹": st.column_config.NumberColumn(format="₹%.2f"),
+                "Stop ₹": st.column_config.NumberColumn(format="₹%.2f")})
+            fig = go.Figure(go.Histogram(x=sim_b["returns"] * sim_b["value"], nbinsx=60, marker_color=BLUE))
+            fig.add_vline(x=target * sim_b["value"], line=dict(color=UP, dash="dash"), annotation_text="Your target")
+            fig.add_vline(x=0, line=dict(color=MUTED, dash="dot"))
+            fig.update_layout(title=f"{pick_plan}: simulated profit/loss in ₹ after {horizon} trading days "
+                                    "(each stock exits at its own target or stop)", showlegend=False)
+            ui.plot(fig, 300)
+            st.caption("Stocks in a basket are simulated on the same historical days, so they rise and fall together "
+                       "as they really do. Costs (~0.3% round trip) included. Small budgets: brokerage minimums "
+                       "can be a bigger share of a ₹1,000 trade than of a ₹1 lakh one.")
+            if st.button("Track this plan in Journal", icon=":material/bookmark_add:"):
+                n_ = 0
+                for t, q in zip(al["ticker"], al["Shares"]):
+                    f = res[t]
+                    n_ += storage.track_prediction({
+                        "entry_date": f.as_of, "ticker": t, "entry": f.price, "target_pct": f.target_pct,
+                        "stop_pct": f.stop_pct, "target_price": f.target_price, "stop_price": f.stop_price,
+                        "horizon": f.horizon, "p_target": f.p_target, "p_stop": f.p_stop, "grade": f.grade,
+                        "verdict": f.verdict, "qty": int(q), "source": "plan"})
+                st.toast(f"Tracking {n_} positions")
 
 # ------------------------------------------------------------------ detail
 ui.section("Deep dive & trade plan")

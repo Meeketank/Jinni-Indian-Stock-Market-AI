@@ -32,6 +32,7 @@ pages = {
         st.Page("app/views/predictor.py", url_path="finder", title="Return Finder", icon=":material/target:"),
         st.Page("app/views/screener.py", url_path="screener", title="Screener", icon=":material/filter_list:"),
         st.Page("app/views/analyzer.py", url_path="analyzer", title="Analyzer", icon=":material/candlestick_chart:"),
+        st.Page("app/views/events.py", url_path="events", title="Sentiment & Events", icon=":material/event:"),
     ],
     "Portfolio": [
         st.Page("app/views/portfolio.py", url_path="risk", title="Risk", icon=":material/shield:"),

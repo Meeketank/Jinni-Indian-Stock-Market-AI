@@ -13,7 +13,13 @@ from jinni import indicators as ind
 from jinni import events
 from jinni import forecast as fc
 from jinni import setups as jsetups
+from jinni import patterns as jpat
+from jinni import risk
+from jinni import seasonality as jseason
+from jinni import sentiment
 from jinni import signals
+from jinni import ta
+from app import charts as jcharts
 from jinni.universe import BENCHMARK, NIFTY50, display_name, normalize_symbol
 
 st.title("Stock Analyzer")
@@ -81,58 +87,183 @@ ui.kpis([
     ("ATR (14)", f"₹{df['ATR'].iloc[-1]:,.2f}", ui.pct(df['ATR'].iloc[-1] / price, 2) + " of price"),
 ])
 
-tab_chart, tab_odds, tab_factors, tab_plan, tab_fund, tab_evidence, tab_news = st.tabs(
-    ["Chart", "Return odds", "Factors", "Trade plan", "Fundamentals", "Signal history", "News"])
+tab_360, tab_chart, tab_pat, tab_ind, tab_odds, tab_season, tab_plan, tab_fund, tab_news = st.tabs(
+    ["360° view", "Chart", "Patterns", "Indicators", "Return odds", "Seasonality", "Trade plan", "Fundamentals",
+     "News & sentiment"])
+tab_factors, tab_evidence = tab_360, tab_ind
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _scan(tk: str, n: int, src: str):
+    d = ui.prices((tk, BENCHMARK), "10y" if n > 1260 else "5y").ohlcv(tk)
+    return jpat.scan(d), ta.summary(d)
+
+
+scan, (ta_tbl, ta_verdict) = _scan(ticker, n_view, pdata.source)
+news = events.headlines(ticker)
+news_s = sentiment.score_news(news)
+
+# ---------------------------------------------------------------- 360 view
+with tab_360:
+    active = scan["chart"] + scan["harmonic"] + scan["wave"] + scan["divergence"] + scan["trend"]
+    recent_c = [p for p in scan["candles"] if p.end >= df_full.index[-3]]
+    bull_n = sum(p.bias > 0 for p in active + recent_c)
+    bear_n = sum(p.bias < 0 for p in active + recent_c)
+    f1m = fc.forecast_stock(ticker, df_full, bench, 21, 0.05, fc.auto_stop_pct(df_full, 21, 0.05), None, n_paths=3000)
+    cal = jseason.calendar_effects(df_full["Close"])
+    this_month = pd.Timestamp.today().month_name()
+    m_row = cal["Month"].loc[this_month] if this_month in cal["Month"].index else None
+    parts = {
+        "Technicals (87 indicators)": (ta_verdict["Overall"]["score"] + 1) * 50,
+        "Factor score": float(last["Composite"]),
+        "Patterns": 50 + 50 * (bull_n - bear_n) / max(bull_n + bear_n, 1),
+        "Forecast (+5% in 1 month)": float(np.clip(50 + f1m.ev * 1000, 0, 100)),
+    }
+    if fund_score is not None:
+        parts["Fundamentals"] = fund_score
+    if np.isfinite(news_s["score"]):
+        parts["News sentiment"] = 50 + 50 * news_s["score"]
+    overall = float(np.mean(list(parts.values())))
+    lab = signals.rating_from_score(overall)
+    st.markdown(f"#### JINNI 360° score: **{overall:.0f}/100** {ui.rating_badge(lab)}", unsafe_allow_html=True)
+    fig = go.Figure(go.Bar(x=list(parts.values()), y=list(parts.keys()), orientation="h",
+                           marker_color=[UP if v >= 60 else DOWN if v < 42 else GOLD for v in parts.values()],
+                           text=[f"{v:.0f}" for v in parts.values()], textposition="outside"))
+    fig.add_vline(x=50, line=dict(color=MUTED, dash="dot"))
+    fig.update_layout(xaxis=dict(range=[0, 105]), title="What each lens says (50 = neutral)")
+    fig.update_yaxes(autorange="reversed")
+    ui.plot(fig, 300)
+    c_past, c_now, c_fut = st.columns(3, gap="medium")
+    r1y = df_full["Close"].iloc[-1] / df_full["Close"].iloc[-min(253, len(df_full))] - 1
+    with c_past:
+        st.markdown("**Past**")
+        ui.kpis([
+            ("1-year return", ui.pct(r1y, 1, sign=True), "", ui.tone(r1y)),
+            (f"{this_month} history", ui.pct(m_row["Avg %"] / 100 * 21, 1, sign=True) if m_row is not None else "—",
+             f"up {m_row['Up %']:.0%} of days" if m_row is not None else ""),
+            ("Max drawdown (5y)", ui.pct(risk.max_drawdown(df_full["Close"].pct_change())["max_drawdown"], 0), "",
+             "down"),
+        ])
+    with c_now:
+        st.markdown("**Present**")
+        ui.kpis([
+            ("Technical summary", ta_verdict["Overall"]["label"],
+             f"{ta_verdict['Overall']['buy']} buy · {ta_verdict['Overall']['sell']} sell"),
+            ("Patterns", f"{bull_n} bullish · {bear_n} bearish", "active chart + recent candles"),
+            ("News tone", news_s["label"], f"{news_s['n']} headlines"),
+        ])
+    with c_fut:
+        st.markdown("**Future**")
+        ev_w = events.event_warnings(ticker, 21)
+        ui.kpis([
+            ("+5% within 1 month", ui.pct(f1m.p_target, 0), f"before a −{f1m.stop_pct:.1%} stop"),
+            ("Median in 1 month", ui.pct(f1m.sim.terminal_pct[50], 1, sign=True),
+             f"90%: {f1m.sim.terminal_pct[5]:+.0%} to {f1m.sim.terminal_pct[95]:+.0%}"),
+            ("Events ahead", f"{len(ev_w)}" if ev_w else "None known", ev_w[0][:40] if ev_w else ""),
+        ])
+    st.caption("The 360° score averages independent lenses so no single signal dominates. Patterns and indicators "
+               "describe the present; only the Forecast lens is a tested probability.")
 
 # ------------------------------------------------------------------ chart
 with tab_chart:
-    overlays = st.multiselect("Overlays", ["SMA20", "SMA50", "SMA200", "EMA21", "Bollinger", "VWAP20"],
-                              default=["SMA50", "SMA200"])
-    lower = st.radio("Lower panel", ["Volume", "RSI", "MACD", "ADX"], horizontal=True, index=1)
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.72, 0.28], vertical_spacing=0.03)
-    fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"],
-                                 name="Price", increasing_line_color=UP, decreasing_line_color=DOWN,
-                                 increasing_fillcolor=UP, decreasing_fillcolor=DOWN), 1, 1)
-    palette = {"SMA20": "#A78BFA", "SMA50": BLUE, "SMA200": GOLD, "EMA21": "#2EC4B6", "VWAP20": "#E86AF0"}
-    for o in overlays:
-        if o == "Bollinger":
-            fig.add_trace(go.Scatter(x=df.index, y=df["BB_up"], line=dict(color=MUTED, width=1), name="BB upper"), 1, 1)
-            fig.add_trace(go.Scatter(x=df.index, y=df["BB_lo"], line=dict(color=MUTED, width=1), name="BB lower",
-                                     fill="tonexty", fillcolor="rgba(138,148,166,0.07)"), 1, 1)
-        else:
-            fig.add_trace(go.Scatter(x=df.index, y=df[o], name=o, line=dict(color=palette[o], width=1.4)), 1, 1)
-    if lower == "Volume":
-        colors = np.where(df["Close"] >= df["Open"], UP, DOWN)
-        fig.add_trace(go.Bar(x=df.index, y=df["Volume"], marker_color=colors, name="Volume", opacity=0.7), 2, 1)
-    elif lower == "RSI":
-        fig.add_trace(go.Scatter(x=df.index, y=df["RSI"], name="RSI", line=dict(color=GOLD, width=1.3)), 2, 1)
-        for y in (30, 70):
-            fig.add_hline(y=y, line=dict(color=MUTED, dash="dot", width=1), row=2, col=1)
-        fig.update_yaxes(range=[0, 100], row=2, col=1)
-    elif lower == "MACD":
-        fig.add_trace(go.Bar(x=df.index, y=df["MACD_hist"], name="Histogram",
-                             marker_color=np.where(df["MACD_hist"] >= 0, UP, DOWN)), 2, 1)
-        fig.add_trace(go.Scatter(x=df.index, y=df["MACD"], name="MACD", line=dict(color=BLUE, width=1.2)), 2, 1)
-        fig.add_trace(go.Scatter(x=df.index, y=df["MACD_signal"], name="Signal",
-                                 line=dict(color=GOLD, width=1.2)), 2, 1)
-    else:
-        fig.add_trace(go.Scatter(x=df.index, y=df["ADX"], name="ADX", line=dict(color=GOLD, width=1.4)), 2, 1)
-        fig.add_trace(go.Scatter(x=df.index, y=df["+DI"], name="+DI", line=dict(color=UP, width=1)), 2, 1)
-        fig.add_trace(go.Scatter(x=df.index, y=df["-DI"], name="-DI", line=dict(color=DOWN, width=1)), 2, 1)
-        fig.add_hline(y=25, line=dict(color=MUTED, dash="dot", width=1), row=2, col=1)
-    fig.update_layout(xaxis_rangeslider_visible=False, hovermode="x unified")
-    fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
-    ui.plot(fig, 560)
-
+    by_cat = {c: [k for k, v in ta.CATALOG.items() if v.cat == c] for c in ta.CATEGORIES}
+    ov_all = [k for k, v in ta.CATALOG.items() if v.kind == "overlay"]
+    pn_all = [k for k, v in ta.CATALOG.items() if v.kind == "panel"]
+    cc1, cc2 = st.columns(2)
+    with cc1:
+        overlays = st.multiselect(f"Overlays ({len(ov_all)} available)", ov_all, default=["EMA 20", "SMA 50", "SMA 200"])
+    with cc2:
+        panels = st.multiselect(f"Indicator panels ({len(pn_all)} available)", pn_all, default=["RSI 14", "MACD"],
+                                max_selections=4)
+    layers = st.multiselect("Auto-detected patterns to draw", jcharts.LAYERS,
+                            default=["Candlestick patterns", "Chart patterns", "Trendlines", "Support/resistance zones"])
+    z1, z2 = st.columns([3, 1], vertical_alignment="bottom")
+    with z1:
+        zoom = st.segmented_control("Zoom", ["3M", "6M", "1Y", "2Y", "5Y"], default="6M")
+    with z2:
+        heikin = st.toggle("Heikin-Ashi", value=False)
+    view_n = {"3M": 63, "6M": 126, "1Y": 252, "2Y": 504, "5Y": 1260}.get(zoom or "6M", 126)
+    fig = jcharts.build(df_full, overlays, panels, layers, scan, heikin, view=min(view_n, len(df_full)))
+    ui.plot(fig, 520 + 150 * len(panels))
+    st.caption("▲/▼ markers = bullish/bearish candlestick patterns; shaded bands = support (green) / resistance (red) "
+               "zones; ✓ = breakout confirmed by a close. Hover a marker for its name.")
     ui.section("Technical events")
     for e in signals.detect_events(df_full):
         st.markdown(f"- {e}")
-    lv = ind.pivot_levels(df_full)
-    sr = ind.support_resistance(df_full["Close"])
-    ui.kpis([(k, f"₹{v:,.2f}") for k, v in lv.items()] + [
-        ("Swing support", f"₹{sr['support']:,.2f}" if sr["support"] else "—"),
-        ("Swing resistance", f"₹{sr['resistance']:,.2f}" if sr["resistance"] else "—"),
-    ])
+    ui.section("Pivot levels (all methods)")
+    st.dataframe(ta.pivots_all(df_full), width="stretch",
+                 column_config={c: st.column_config.NumberColumn(format="₹%.2f") for c in
+                                ["Classic", "Fibonacci", "Camarilla", "Woodie", "DeMark"]})
+    vp = ta.volume_profile(df_full)
+    ui.kpis([("Volume POC (1y)", f"₹{vp['POC']:,.2f}", "most-traded price"),
+             ("Value area high", f"₹{vp['VAH']:,.2f}", "70% of volume"),
+             ("Value area low", f"₹{vp['VAL']:,.2f}")])
+
+# --------------------------------------------------------------- patterns
+with tab_pat:
+    all_p = scan["chart"] + scan["harmonic"] + scan["wave"] + scan["divergence"] + scan["trend"] + scan["gap"]
+    if not all_p and not scan["candles"]:
+        st.info("No patterns detected right now.")
+    rows = [{"Pattern": p.name, "Type": p.kind.title(), "Bias": p.bias_text, "Status": p.status,
+             "Since": p.start.date() if hasattr(p.start, "date") else p.start, "Target ₹": p.target,
+             "Invalidation ₹": p.invalidation, "What it means": p.note} for p in all_p]
+    rows += [{"Pattern": p.name, "Type": "Candle", "Bias": p.bias_text, "Status": "printed",
+              "Since": p.end.date(), "Target ₹": None, "Invalidation ₹": None, "What it means": ""}
+             for p in scan["candles"]]
+    if rows:
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True, column_config={
+            "Target ₹": st.column_config.NumberColumn(format="₹%.2f"),
+            "Invalidation ₹": st.column_config.NumberColumn(format="₹%.2f")})
+    ui.section("Did these patterns work on this stock before?")
+    hz_p = st.select_slider("Look-ahead (trading days)", [5, 10, 20], value=10, key="pat_h")
+    cs = jpat.candle_stats(df_full, scan["candle_frame"], hz_p)
+    cs = cs[cs["Times"] > 0].sort_values("Times", ascending=False)
+    st.markdown(f"**Candlestick patterns**: average {hz_p}-day move after each, on {display_name(ticker)}'s own "
+                f"history (stock's normal {hz_p}-day average: {cs.attrs['base_mean']:+.2%}).")
+    st.dataframe(cs, width="stretch", column_config={
+        f"Avg {hz_p}d": st.column_config.NumberColumn(format="percent"),
+        "Up %": st.column_config.NumberColumn(format="percent"),
+        "Worked %": st.column_config.NumberColumn(format="percent", help="Moved in the pattern's direction"),
+        "Edge vs avg": st.column_config.NumberColumn(format="percent"),
+        "Last seen": st.column_config.DateColumn()})
+
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def _ph(tk, h, src):
+        return jpat.pattern_history(ui.prices((tk, BENCHMARK), "5y").ohlcv(tk), h)
+
+    with st.spinner("Replaying chart patterns through history…"):
+        ph = _ph(ticker, max(hz_p, 10), pdata.source)
+    st.markdown("**Chart & harmonic patterns**, replayed through history using only information available at the time:")
+    st.dataframe(ph, width="stretch", column_config={
+        c: st.column_config.NumberColumn(format="percent") for c in ph.columns if c != "Times"})
+    st.caption("Small counts are noise. A pattern that 'worked' 50% of the time on one stock has no edge there.")
+
+# ------------------------------------------------------------- indicators
+with tab_ind:
+    v = ta_verdict
+    g_cols = st.columns(3)
+    for col, cat in zip(g_cols, ["Overall", "Moving averages", "Momentum"]):
+        with col:
+            sc = v[cat]["score"]
+            fig = go.Figure(go.Indicator(
+                mode="gauge+number", value=sc * 100, number=dict(suffix="", valueformat=".0f"),
+                title=dict(text=f"{cat}<br><span style='font-size:12px'>{v[cat]['label']}</span>"),
+                gauge=dict(axis=dict(range=[-100, 100], tickvals=[-100, -50, 0, 50, 100]),
+                           bar=dict(color=UP if sc > 0.1 else DOWN if sc < -0.1 else GOLD),
+                           bgcolor="#111823", borderwidth=0,
+                           steps=[dict(range=[-100, -50], color="rgba(239,68,68,.25)"),
+                                  dict(range=[50, 100], color="rgba(34,197,94,.25)")])))
+            ui.plot(fig, 220)
+    ui.kpis([(cat, v[cat]["label"], f"{v[cat]['buy']} buy · {v[cat]['neutral']} neutral · {v[cat]['sell']} sell")
+             for cat in ta.CATEGORIES])
+    cat_f = st.multiselect("Show categories", ta.CATEGORIES, default=ta.CATEGORIES)
+    show = ta_tbl[ta_tbl["Category"].isin(cat_f)]
+    st.dataframe(show.drop(columns=["Votes"]), width="stretch", hide_index=True,
+                 height=min(700, 38 + 35 * len(show)),
+                 column_config={"Value": st.column_config.NumberColumn(format="%.2f")})
+    st.caption(f"{len(ta.CATALOG)} indicators. Measurement-only indicators (ATR, volatility, width…) show values "
+               "but don't vote. Indicator signals are descriptive, and many are correlated: 20 moving averages "
+               "agreeing is one opinion, not twenty.")
 
 # --------------------------------------------------------------- odds
 with tab_odds:
@@ -193,6 +324,27 @@ with tab_factors:
     st.caption(f"Technical weights: {weights_txt}. "
                + ("Final score = 80% technical + 20% fundamentals." if fund_score is not None
                   else "No fundamentals available, so the score is technical only."))
+
+# ------------------------------------------------------------ seasonality
+with tab_season:
+    cal = jseason.calendar_effects(df_full["Close"])
+    st.markdown(f"How {display_name(ticker)} has behaved by calendar (last {len(df_full) // 252} years). "
+                "Rows marked significant survive a correction for testing many rows at once.")
+    s1, s2 = st.columns(2, gap="medium")
+    for col, key in ((s1, "Month"), (s2, "Weekday")):
+        with col:
+            t = cal[key].dropna(subset=["Avg %"])
+            fig = go.Figure(go.Bar(x=t.index, y=t["Avg %"], marker_color=[UP if x >= 0 else DOWN for x in t["Avg %"]],
+                                   text=[f"{u:.0%} up" for u in t["Up %"]], textposition="outside"))
+            fig.update_layout(title=f"Average daily return by {key.lower()} (%)")
+            ui.plot(fig, 300)
+    st.dataframe(cal["Special days"], width="stretch", column_config={
+        "Up %": st.column_config.NumberColumn(format="percent"), "p-value": st.column_config.NumberColumn(format="%.3f")})
+    up_ev = jseason.upcoming(df_full["Close"])
+    if not up_ev.empty:
+        ui.section("Coming up")
+        st.dataframe(up_ev, width="stretch", column_config={"Past up %": st.column_config.NumberColumn(format="percent")})
+    st.page_link("app/views/events.py", label="Test any event or date rule in the Event Lab", icon=":material/event:")
 
 # --------------------------------------------------------------- trade plan
 with tab_plan:
@@ -274,13 +426,22 @@ with tab_evidence:
 with tab_news:
     for w in events.event_warnings(ticker, 21):
         st.warning(w, icon=":material/event:")
-    news = events.headlines(ticker)
+    if news_s["n"]:
+        ui.kpis([("News tone", news_s["label"], f"score {news_s['score']:+.2f} (−1 to +1)",
+                  ui.tone(news_s["score"])),
+                 ("Positive headlines", f"{news_s['pos']}", "", "up"),
+                 ("Negative headlines", f"{news_s['neg']}", "", "down")])
     if news.empty:
         st.caption("No headlines available right now.")
-    for _, n in news.iterrows():
+    for k_, n in news.iterrows():
+        sc_ = news_s["scores"].get(k_, 0) if news_s["n"] else 0
+        dot = "🟢" if sc_ > 0.1 else "🔴" if sc_ < -0.1 else "⚪"
         tags = f" <span class='badge b-hold'>{n['Tags']}</span>" if n["Tags"] else ""
         when = n["Time"].strftime("%d %b %H:%M") if n["Time"] is not None else ""
-        st.markdown(f"<span class='hint'>{when}</span> [{n['Headline']}]({n['Link']}){tags}", unsafe_allow_html=True)
+        st.markdown(f"{dot} <span class='hint'>{when}</span> [{n['Headline']}]({n['Link']}){tags}",
+                    unsafe_allow_html=True)
+    st.caption("Tone is scored with a finance word list (negation-aware). It measures how headlines read, "
+               "not whether they are right.")
 
 # ------------------------------------------------------------------ actions
 a1, a2 = st.columns(2)

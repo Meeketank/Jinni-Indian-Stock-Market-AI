@@ -233,8 +233,10 @@ def _demo_info(ticker: str) -> dict:
 # --------------------------------------------------------------------- api
 
 
-def get_prices(tickers: list[str] | tuple[str, ...], period: str = "2y", interval: str = "1d") -> PriceData:
-    """Fetch OHLCV for many tickers in one request, falling back to demo data."""
+def get_prices(tickers: list[str] | tuple[str, ...], period: str = "2y", interval: str = "1d",
+               allow_demo: bool = True) -> PriceData:
+    """Fetch OHLCV for many tickers in one request, falling back to demo data
+    (unless ``allow_demo`` is False, in which case a failure raises)."""
     tickers = list(dict.fromkeys(tickers))  # dedupe, keep order
     if not tickers:
         raise ValueError("No tickers given")
@@ -242,6 +244,8 @@ def get_prices(tickers: list[str] | tuple[str, ...], period: str = "2y", interva
         live = _download_yahoo(tickers, period, interval)
         if live is not None:
             return live
+        if not allow_demo:
+            raise RuntimeError("Live data unavailable")
     n_days = PERIOD_DAYS.get(period, 2 * TRADING_DAYS)
     # Always generate enough history for the stress scenarios in demo mode.
     demo = _demo_prices(sorted(set(tickers) | {BENCHMARK}), max(n_days, 1800))

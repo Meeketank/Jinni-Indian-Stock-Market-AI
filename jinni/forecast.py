@@ -450,3 +450,88 @@ def evaluate_tracked(df: pd.DataFrame, entry_date, entry: float, target_price: f
     if len(after) >= horizon:
         return {"status": "Expired", "exit_date": after.index[-1], "ret": last["Close"] / entry - 1, "days": horizon}
     return {"status": "Open", "exit_date": None, "ret": last["Close"] / entry - 1, "days": len(after)}
+
+
+# ---------------------------------------------------------- budget baskets
+
+
+def allocate_budget(cands: pd.DataFrame, budget: float, max_names: int = 3) -> pd.DataFrame:
+    """Whole-share allocation of ``budget`` across the best candidates.
+
+    ``cands`` needs columns ticker and Price, sorted best first. Walks down the
+    ranking buying names that still fit (aiming for an equal rupee split across
+    up to ``max_names``), then spends leftover cash on the chosen names in
+    rank order."""
+    per = budget / max_names
+    cash = budget
+    shares: dict[str, int] = {}
+    px = dict(zip(cands["ticker"], cands["Price"]))
+    for t, p in zip(cands["ticker"], cands["Price"]):
+        if len(shares) >= max_names:
+            break
+        if p <= cash:
+            q = max(1, int(min(per, cash) // p))
+            shares[t] = q
+            cash -= q * p
+    changed = True
+    while changed:
+        changed = False
+        for t in list(shares):
+            if px[t] <= cash:
+                shares[t] += 1
+                cash -= px[t]
+                changed = True
+    out = pd.DataFrame({"ticker": list(shares), "Price": [px[t] for t in shares], "Shares": list(shares.values())})
+    out["Invest ₹"] = out["Price"] * out["Shares"]
+    out.attrs["cash"] = cash
+    return out
+
+
+def simulate_basket(dfs: dict[str, pd.DataFrame], shares: dict[str, int], horizon: int, target: float,
+                    stops: dict[str, float | None], n_paths: int = 4000, seed: int = 19, block: int = 5,
+                    lookback: int = 750) -> dict:
+    """Joint Monte Carlo of a basket: every stock replays the SAME historical
+    days in each path, so their co-movement is kept. Each position exits at its
+    own target/stop; the basket result is the rupee-weighted sum."""
+    tick = [t for t in shares if shares[t] > 0 and t in dfs]
+    ratios = {t: bar_ratios(dfs[t].iloc[-lookback - 1:]) for t in tick}
+    common = None
+    for r in ratios.values():
+        common = r.index if common is None else common.intersection(r.index)
+    if common is None or len(common) < 120:
+        raise ValueError("Not enough overlapping history for the basket.")
+    rng = np.random.default_rng(seed)
+    T = len(common)
+    n_blocks = int(np.ceil(horizon / block))
+    starts = rng.integers(0, T - block, size=(n_paths, n_blocks))
+    idx = (starts[:, :, None] + np.arange(block)[None, None, :]).reshape(n_paths, -1)[:, :horizon]
+    value0 = sum(shares[t] * float(dfs[t]["Close"].iloc[-1]) for t in tick)
+    pnl = np.zeros(n_paths)
+    for t in tick:
+        R = ratios[t].loc[common, ["o", "h", "l", "c"]].values.copy()
+        vol_t, vol_now = _ewma_vol(R[:, 3])
+        R = (R - R[:, 3].mean()) * np.clip(vol_now / np.maximum(vol_t, 1e-6), 0.33, 3.0)[:, None]
+        R = R + MARKET_DRIFT / TRADING_DAYS
+        bars = R[idx]
+        cl = np.cumsum(bars[:, :, 3], axis=1)
+        prev = np.concatenate([np.zeros((n_paths, 1)), cl[:, :-1]], axis=1)
+        o, h, lo = prev + bars[:, :, 0], prev + bars[:, :, 1], prev + bars[:, :, 2]
+        lt = np.log1p(target)
+        st_ = stops.get(t)
+        ls = np.log1p(-st_) if st_ else -np.inf
+        ht, hs = h >= lt, lo <= ls
+        both = ht & hs
+        ht, hs = ht & ~(both & (o < lt)), hs & ~(both & (o >= lt))
+        big = horizon + 1
+        ft = np.where(ht.any(1), ht.argmax(1), big)
+        fs = np.where(hs.any(1), hs.argmax(1), big)
+        rows = np.arange(n_paths)
+        ret = np.expm1(cl[:, -1])
+        rt = np.expm1(np.maximum(o[rows, np.minimum(ft, horizon - 1)], lt))
+        rs = np.expm1(np.minimum(o[rows, np.minimum(fs, horizon - 1)], ls)) if st_ else ret
+        realised = np.where(ft < fs, rt, np.where(fs < ft, rs, ret))
+        pnl += shares[t] * float(dfs[t]["Close"].iloc[-1]) * (realised - COST_ROUND_TRIP)
+    r = pnl / value0
+    return {"value": value0, "p_reach": float((r >= target - COST_ROUND_TRIP).mean()), "p_loss": float((r < 0).mean()),
+            "exp": float(r.mean()), "p5": float(np.percentile(r, 5)), "p50": float(np.percentile(r, 50)),
+            "p95": float(np.percentile(r, 95)), "returns": r}
