@@ -27,14 +27,18 @@ splash_once()
 st.logo(str(ROOT / "assets" / "logo.svg"), size="large")
 
 pages = {
-    "Markets": [
+    "Find trades": [
         st.Page("app/views/home.py", title="Home", icon=":material/space_dashboard:", default=True),
-        st.Page("app/views/analyzer.py", url_path="analyzer", title="Analyzer", icon=":material/candlestick_chart:"),
+        st.Page("app/views/predictor.py", url_path="finder", title="Return Finder", icon=":material/target:"),
         st.Page("app/views/screener.py", url_path="screener", title="Screener", icon=":material/filter_list:"),
+        st.Page("app/views/analyzer.py", url_path="analyzer", title="Analyzer", icon=":material/candlestick_chart:"),
     ],
     "Portfolio": [
         st.Page("app/views/portfolio.py", url_path="risk", title="Risk", icon=":material/shield:"),
         st.Page("app/views/optimizer.py", url_path="optimizer", title="Optimizer", icon=":material/tune:"),
+    ],
+    "Track & test": [
+        st.Page("app/views/journal.py", url_path="journal", title="Journal", icon=":material/fact_check:"),
         st.Page("app/views/lab.py", url_path="lab", title="Lab", icon=":material/science:"),
         st.Page("app/views/settings.py", url_path="settings", title="Settings", icon=":material/settings:"),
     ],

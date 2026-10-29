@@ -10,6 +10,9 @@ from app import components as ui
 from app import storage
 from app.theme import BLUE, DOWN, GOLD, MUTED, UP
 from jinni import indicators as ind
+from jinni import events
+from jinni import forecast as fc
+from jinni import setups as jsetups
 from jinni import signals
 from jinni.universe import BENCHMARK, NIFTY50, display_name, normalize_symbol
 
@@ -78,8 +81,8 @@ ui.kpis([
     ("ATR (14)", f"₹{df['ATR'].iloc[-1]:,.2f}", ui.pct(df['ATR'].iloc[-1] / price, 2) + " of price"),
 ])
 
-tab_chart, tab_factors, tab_plan, tab_fund, tab_evidence = st.tabs(
-    ["Chart", "Factors", "Trade plan", "Fundamentals", "Signal history"])
+tab_chart, tab_odds, tab_factors, tab_plan, tab_fund, tab_evidence, tab_news = st.tabs(
+    ["Chart", "Return odds", "Factors", "Trade plan", "Fundamentals", "Signal history", "News"])
 
 # ------------------------------------------------------------------ chart
 with tab_chart:
@@ -130,6 +133,36 @@ with tab_chart:
         ("Swing support", f"₹{sr['support']:,.2f}" if sr["support"] else "—"),
         ("Swing resistance", f"₹{sr['resistance']:,.2f}" if sr["resistance"] else "—"),
     ])
+
+# --------------------------------------------------------------- odds
+with tab_odds:
+    st.markdown("Chance of the price **touching** each gain within each window (no stop), averaged from 3,000 "
+                "simulated paths and the stock's own history.")
+    mat = fc.odds_matrix(df_full)
+    fig = go.Figure(go.Heatmap(z=mat.values, x=mat.columns, y=mat.index, zmin=0, zmax=1,
+                               colorscale=[[0, "#111823"], [0.5, "#3B5B99"], [1, UP]], showscale=False,
+                               text=[[f"{v:.0%}" for v in r] for r in mat.values], texttemplate="%{text}"))
+    fig.update_yaxes(autorange="reversed")
+    ui.plot(fig, 300)
+    o1, o2 = st.columns(2)
+    with o1:
+        q_t = st.select_slider("Goal", [0.02, 0.03, 0.05, 0.075, 0.10, 0.15, 0.20], value=0.05,
+                               format_func=lambda x: f"+{x:.1%}".replace(".0%", "%"))
+    with o2:
+        q_h = st.selectbox("Within", list(fc.HORIZONS), index=2)
+    hz = fc.HORIZONS[q_h]
+    stop_q = fc.auto_stop_pct(df_full, hz, q_t)
+    fq = fc.forecast_stock(ticker, df_full, bench, hz, q_t, stop_q, None, n_paths=4000)
+    ui.kpis([
+        ("Target first", ui.pct(fq.p_target, 0), f"₹{fq.target_price:,.2f}", "up"),
+        ("Stop first", ui.pct(fq.p_stop, 0), f"₹{fq.stop_price:,.2f} (−{stop_q:.1%} auto)", "down"),
+        ("Expected return", ui.pct(fq.ev, 2, sign=True), "after costs", ui.tone(fq.ev)),
+        ("Grade", fq.grade, fq.verdict),
+    ])
+    act_now = jsetups.active_setups(df_full)
+    st.caption(("Active setups: " + ", ".join(act_now) + ". ") if act_now else "No chart setup active today. ")
+    st.page_link("app/views/predictor.py", label="Compare against every stock in Return Finder",
+                 icon=":material/target:")
 
 # ---------------------------------------------------------------- factors
 with tab_factors:
@@ -236,6 +269,18 @@ with tab_evidence:
                                fmt=".1%"), 280)
         st.caption("In-sample check of a rules-based score (no fitting). Overlapping windows, so day counts overstate "
                    "independent observations. See Strategy Lab for cost-adjusted backtests.")
+
+# ------------------------------------------------------------------- news
+with tab_news:
+    for w in events.event_warnings(ticker, 21):
+        st.warning(w, icon=":material/event:")
+    news = events.headlines(ticker)
+    if news.empty:
+        st.caption("No headlines available right now.")
+    for _, n in news.iterrows():
+        tags = f" <span class='badge b-hold'>{n['Tags']}</span>" if n["Tags"] else ""
+        when = n["Time"].strftime("%d %b %H:%M") if n["Time"] is not None else ""
+        st.markdown(f"<span class='hint'>{when}</span> [{n['Headline']}]({n['Link']}){tags}", unsafe_allow_html=True)
 
 # ------------------------------------------------------------------ actions
 a1, a2 = st.columns(2)

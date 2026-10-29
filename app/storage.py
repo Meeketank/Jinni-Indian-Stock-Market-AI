@@ -23,6 +23,12 @@ CREATE TABLE IF NOT EXISTS holdings (
 CREATE TABLE IF NOT EXISTS watchlist (
     ticker TEXT PRIMARY KEY, added_at TEXT
 );
+CREATE TABLE IF NOT EXISTS predictions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, created TEXT, entry_date TEXT, ticker TEXT, entry REAL,
+    target_pct REAL, stop_pct REAL, target_price REAL, stop_price REAL, horizon INTEGER,
+    p_target REAL, p_stop REAL, grade TEXT, verdict TEXT, qty INTEGER, source TEXT
+);
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS analysis_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, ticker TEXT, price REAL, rating TEXT,
     composite REAL, trend REAL, momentum REAL, timing REAL, volume REAL, risk REAL,
@@ -106,3 +112,47 @@ def _firestore_mirror(collection: str, doc: dict) -> None:
         firestore.Client().collection(collection).add(doc)
     except Exception:
         pass
+
+
+# ------------------------------------------------------------ predictions
+
+
+def track_prediction(row: dict) -> bool:
+    """Store a prediction. Returns False if the same ticker/plan was already tracked today."""
+    row = {"created": datetime.now(timezone.utc).isoformat(), **row}
+    with closing(_conn()) as con, con:
+        dup = con.execute(
+            "SELECT 1 FROM predictions WHERE ticker=? AND entry_date=? AND target_pct=? AND horizon=?",
+            (row["ticker"], row["entry_date"], row["target_pct"], row["horizon"]),
+        ).fetchone()
+        if dup:
+            return False
+        con.execute(f"INSERT INTO predictions ({','.join(row)}) VALUES ({','.join('?' * len(row))})",
+                    list(row.values()))
+    return True
+
+
+def predictions() -> pd.DataFrame:
+    with closing(_conn()) as con:
+        return pd.read_sql_query("SELECT * FROM predictions ORDER BY id DESC", con)
+
+
+def delete_prediction(pid: int) -> None:
+    with closing(_conn()) as con, con:
+        con.execute("DELETE FROM predictions WHERE id=?", (int(pid),))
+
+
+# ---------------------------------------------------------------- settings
+
+import json as _json  # noqa: E402
+
+
+def load_setting(key: str, default=None):
+    with closing(_conn()) as con:
+        r = con.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return _json.loads(r[0]) if r else default
+
+
+def save_setting(key: str, value) -> None:
+    with closing(_conn()) as con, con:
+        con.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", (key, _json.dumps(value)))

@@ -9,6 +9,7 @@ from app import components as ui
 from app import storage
 from app.theme import DOWN, GOLD, UP
 from jinni import indicators as ind
+from jinni import setups as jsetups
 from jinni import signals
 from jinni.universe import BENCHMARK, NIFTY50, display_name, normalize_symbol, sector_of
 
@@ -58,6 +59,7 @@ def screen(tickers: tuple[str, ...]) -> tuple[pd.DataFrame, str]:
             "Timing": sc["Timing"], "Volume": sc["Volume"], "Risk": sc["Risk"],
             "RSI": ind.rsi(c).iloc[-1], "Vol 20d": ind.realized_vol(c).iloc[-1],
             "Stop": plan.stop, "T1": plan.targets[0], "Upside T1": plan.targets[0] / plan.entry - 1,
+            "Setups": ", ".join(jsetups.active_setups(df)),
         })
     return pd.DataFrame(rows), pdata.source
 
@@ -80,9 +82,12 @@ with st.expander("Filters", expanded=False, icon=":material/tune:"):
     with f3:
         min_score = st.slider("Min score", 0, 100, 0)
         max_rsi = st.slider("Max RSI", 30, 100, 100)
+    setup_pick = st.multiselect("Chart setup active today", list(jsetups.SETUPS))
 view = res[res["Rating"].isin(ratings) & (res["Score"] >= min_score) & (res["RSI"] <= max_rsi)]
 if sectors:
     view = view[view["Sector"].isin(sectors)]
+if setup_pick:
+    view = view[view["Setups"].apply(lambda x: any(p in x for p in setup_pick))]
 view = view.sort_values("Score", ascending=False)
 
 counts = res["Rating"].value_counts()

@@ -40,6 +40,18 @@ def settings() -> dict:
     }
 
 
+def rules() -> dict:
+    """Pre-trade risk rules: session > saved > defaults."""
+    from jinni.riskcheck import DEFAULT_RULES
+
+    from . import storage
+
+    if "rules" not in st.session_state:
+        saved = storage.load_setting("rules", {}) or {}
+        st.session_state["rules"] = {**DEFAULT_RULES, **saved}
+    return st.session_state["rules"]
+
+
 # ----------------------------------------------------------- formatting
 
 

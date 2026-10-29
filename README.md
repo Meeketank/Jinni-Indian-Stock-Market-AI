@@ -15,12 +15,16 @@ with a visible **DEMO DATA** badge, if Yahoo Finance is unreachable.
 
 | Page | What it does |
 |---|---|
+| **Return Finder** | Pick a goal (+2/5/10/15%/custom within 1 week to 3 months, auto/fixed/no stop). Every stock gets P(target first), P(stop first), P(touch), expected return after costs, an A–D grade and a plain verdict, from three engines: a **Time Machine** (4,000 volatility-rescaled block-bootstrap paths of the stock's own daily bars, stop checked before target, gaps fill at the open), **history replay** (every past day and "days like today", shrunk for small samples) and a **calibrated ML model** that only gets blend weight in proportion to its walk-forward AUC. Deep dive: price cone, engine breakdown, setup history, odds grid, sizing that names the deciding limit, PASS/WARN/BLOCK risk gate, portfolio VaR impact, news and results-date warnings |
+| **Journal** | Tracks predictions and paper trade plans, scores them against the real price path afterwards (target / stop / expired), and shows hit rate vs predicted, calibration and results by grade |
 | **Home** | Index ticker tape, market regime (NIFTY trend), India VIX, breadth, advance/decline, sector-rotation heatmap, top movers |
 | **Analyzer** | Candlestick chart with overlays (SMA/EMA/Bollinger/VWAP) and RSI/MACD/ADX panels, a 5-factor rating (Trend, Momentum, Timing, Volume, Risk + fundamentals), ATR/structure-based trade plan with position sizing, pivots and swing levels, and the **measured** forward returns after each past rating |
 | **Screener** | Scores the NIFTY 50, your watchlist or a custom list. Filters, CSV export, momentum-vs-risk map, sector scores |
 | **Risk** | Holdings editor (CSV import/export), live P&L, VaR/CVaR four ways (historical, Gaussian, Cornish-Fisher, Monte Carlo Student-t), Kupiec VaR backtest, Euler risk contribution, correlation, beta/idiosyncratic split, historical stress replay (COVID 2020, 2022 rate shock, Adani-Hindenburg, 2024 election day, …), beta shocks, drawdowns, rolling beta, liquidity / days-to-exit |
 | **Optimizer** | Max-Sharpe, min-volatility, risk parity, max diversification. Ledoit-Wolf covariance, CAPM-implied or shrunk expected returns, per-stock and sector caps, efficient frontier, whole-share allocation and a rebalance trade list with Indian cost estimates |
 | **Lab** | Backtests five rules net of costs (no look-ahead) and a gradient-boosting model validated **walk-forward with a purge gap**, reported against the base rate with AUC, Brier, quintile returns and feature importance |
+
+Ideas adapted from [day-trader-skill](https://github.com/Jakeschincariol/day-trader-skill) for NSE daily bars: the Time Machine replay and its break-even verdict (a target S/X away must come first in S/(X+S) of decided cases), sizing to a max loss that names the deciding limit, a PASS/BLOCK risk gate, setup scans, news tagging, and "never round a coin flip up into an edge".
 
 ## Accuracy fixes vs v1
 

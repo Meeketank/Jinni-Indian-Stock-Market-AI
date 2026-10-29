@@ -136,6 +136,12 @@ if not c.empty and len(c) > 22:
         st.dataframe(chg.nsmallest(5, "1D"), column_config=fmt, width="stretch")
 
 # ---------------------------------------------------------------- nav
+ui.section("Start here")
+with st.container(border=True):
+    st.markdown("**Which stocks can make my target?** Pick a gain and a time window, and JINNI ranks every stock by its "
+                "odds of getting there before the stop, then sizes and risk-checks the trade.")
+    st.page_link("app/views/predictor.py", label="Open Return Finder", icon=":material/target:", width="stretch")
+
 ui.section("Workspaces")
 cards = [
     ("app/views/analyzer.py", "Stock Analyzer", ":material/candlestick_chart:",
@@ -148,6 +154,8 @@ cards = [
      "Max-Sharpe, min-vol, risk-parity with sector caps and trade list."),
     ("app/views/lab.py", "Strategy Lab", ":material/science:",
      "Backtests with Indian costs, walk-forward ML validation."),
+    ("app/views/journal.py", "Journal", ":material/fact_check:",
+     "Every tracked prediction scored against what really happened."),
 ]
 for row in (cards[:3], cards[3:]):
     cols = st.columns(3)
