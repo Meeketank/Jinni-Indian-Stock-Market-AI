@@ -30,7 +30,7 @@ class Ctx:
     def __init__(self, t: str):
         self.t = normalize_symbol(t)
         self.pdx = prices([self.t, BENCHMARK], "10y", ttl=CTX_TTL)
-        self.df = need_series(self.pdx, self.t)
+        self.df = need_series(self.pdx, self.t, min_len=1)  # new listings have only a few bars
         self.bench = self.pdx.close[BENCHMARK] if BENCHMARK in self.pdx.close else None
         self.info = memo(("info", self.t), 3600, lambda: jdata.fetch_info(self.t))
         self.name = self.info.get("longName") or self.info.get("shortName") or display_name(self.t)
@@ -41,8 +41,19 @@ class Ctx:
         return self.pdx.source
 
 
-def ctx(t: str) -> Ctx:
-    return memo(("ctx", normalize_symbol(t)), 120, lambda: Ctx(t))
+MIN_BARS = 60  # history needed for indicators, patterns and forecasts
+
+
+def ctx(t: str, need: int = MIN_BARS) -> Ctx:
+    c = memo(("ctx", normalize_symbol(t)), 120, lambda: Ctx(t))
+    if len(c.df) < need:
+        n, first = len(c.df), c.df.index[0]
+        unlock = pd.bdate_range(first, periods=MIN_BARS)[-1]
+        raise ApiError(422, f"{c.t} is a new listing: only {n} trading day{'s' if n != 1 else ''} of history since "
+                            f"{first:%d %b %Y}. Indicators, patterns and forecasts need at least {MIN_BARS} trading days "
+                            f"and unlock around {unlock:%d %b %Y}. The 360° tab shows what is available now.",
+                       code="new_listing")
+    return c
 
 
 def window_scan(c: Ctx, bars: int):
@@ -64,10 +75,33 @@ def news_of(c: Ctx):
 # --------------------------------------------------------------- overview
 
 
+def new_listing_overview(c: Ctx):
+    df = c.df
+    n, price = len(df), float(df["Close"].iloc[-1])
+    first = float(df["Open"].iloc[0]) if "Open" in df else float(df["Close"].iloc[0])
+    blocks = source_notice(c.source)
+    blocks.append({"type": "stockhead", "name": c.name, "ticker": c.t, "sector": c.sector,
+                   "asof": df.index[-1].strftime("%d %b %Y"), "rating": "NEW LISTING", "cls": "b-hold"})
+    items = [("Last price", f"₹{price:,.2f}", pct(price / float(df["Close"].iloc[-2]) - 1, 2, True) if n > 1 else "", 
+              tone(price / float(df["Close"].iloc[-2]) - 1) if n > 1 else None),
+             ("Since first trade", pct(price / first - 1, 1, True), f"opened ₹{first:,.2f}", tone(price / first - 1)),
+             ("Range so far", f"₹{float(df['Low'].min()):,.2f}–{float(df['High'].max()):,.2f}", f"{n} trading day{'s' if n != 1 else ''}"),
+             ("Volume (last day)", f"{int(df['Volume'].iloc[-1]):,}", "")]
+    blocks.append(kpis(items))
+    blocks.append(callout("info", f"{c.t} listed on {df.index[0]:%d %b %Y}. With only {n} trading day{'s' if n != 1 else ''} of "
+                                  f"history, JINNI will not invent a score, patterns or a forecast. They unlock after "
+                                  f"{MIN_BARS} trading days (around {pd.bdate_range(df.index[0], periods=MIN_BARS)[-1]:%d %b %Y})."))
+    if n > 2:
+        blocks.append(plot(figs.lines(df.index, {"Close": dict(y=df["Close"], color=figs.GOLD, width=2)}, "Price since listing"), 300))
+    return reply(doc(blocks, c.source, price=price, rating="NEW LISTING", name=c.name), ttl=120)
+
+
 @router.get("/stock/{t}/overview")
 def overview(t: str):
-    c = ctx(t)
+    c = ctx(t, need=1)
     df = c.df
+    if len(df) < MIN_BARS:
+        return new_listing_overview(c)
     scores = memo(("scores", c.t, str(df.index[-1])), CTX_TTL, lambda: signals.factor_scores(df, c.bench))
     last = scores.iloc[-1]
     fund_score, fund_parts = signals.fundamental_score(c.info)

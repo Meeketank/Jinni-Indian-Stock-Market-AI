@@ -124,7 +124,7 @@ def _download_yahoo(tickers: list[str], period: str, interval: str) -> PriceData
         for k in frames:
             frames[k].index = frames[k].index.tz_localize(None)
     close = frames["Close"]
-    missing = [t for t in tickers if t not in close or close[t].notna().sum() < 5]
+    missing = [t for t in tickers if t not in close or close[t].notna().sum() < 1]
     ok = [t for t in tickers if t not in missing]
     if not ok:
         return None

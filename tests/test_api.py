@@ -380,3 +380,18 @@ def test_search_matches_company_names_and_merges_yahoo(client, monkeypatch):
     assert [r["t"] for r in got] == ["JIOFIN.NS", "JIOFIN.BO"]          # foreign tickers dropped
     monkeypatch.setattr(rm.jdata, "_yf", lambda: (_ for _ in ()).throw(RuntimeError("down")))
     assert rm._yahoo_hits("jio") == []                                  # a dead feed never breaks search
+
+
+def test_new_listing_shows_what_exists_and_explains_the_rest(client, monkeypatch):
+    from server import routes_stock as rs
+
+    real = rs.need_series
+    monkeypatch.setattr(rs, "need_series", lambda pdx, t, min_len=60: real(pdx, t, 1).tail(3))
+    ov = client.get("/api/stock/NEWLIST1.NS/overview")
+    assert ov.status_code == 200
+    body = ov.json()
+    assert body["data"]["rating"] == "NEW LISTING"
+    assert "will not invent a score" in str(body["blocks"])
+    for tab in ("chart", "patterns", "indicators", "odds"):
+        r = client.get(f"/api/stock/NEWLIST1.NS/{tab}")
+        assert r.status_code == 422 and r.json()["code"] == "new_listing" and "unlock" in r.json()["error"]
