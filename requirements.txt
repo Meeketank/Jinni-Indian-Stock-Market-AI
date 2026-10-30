@@ -1,10 +1,9 @@
-# Runtime dependencies for the Streamlit app (streamlit_app.py) and the jinni/ engine.
-streamlit>=1.50
-yfinance>=0.2.54
-pandas>=2.1
-numpy>=1.26
-scipy>=1.11
-scikit-learn>=1.4
-plotly>=5.20
-# Optional: mirror saved analyses to Firestore when GOOGLE_APPLICATION_CREDENTIALS is set
-# google-cloud-firestore>=2.13
+# Runtime dependencies for the Vercel deployment (index.py + jinni/ + server/).
+# Deliberately lean: Vercel bundles everything listed here (limit 500 MB; this set is ~330 MB).
+# Streamlit and Plotly are NOT needed by the web API and live in requirements-streamlit.txt.
+fastapi>=0.115,<1
+numpy>=2.0,<3
+pandas>=2.2,<4
+scipy>=1.13,<2
+scikit-learn>=1.5,<2
+yfinance>=0.2.54,<2

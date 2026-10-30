@@ -1,0 +1,11 @@
+# Keep the deployment small: none of this is needed at runtime.
+legacy/
+tests/
+.devcontainer/
+.streamlit/
+app/
+assets/
+*.md
+streamlit_app.py
+requirements-streamlit.txt
+requirements-dev.txt

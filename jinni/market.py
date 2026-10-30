@@ -28,7 +28,9 @@ log = logging.getLogger(__name__)
 
 HERE = Path(__file__).resolve().parent
 FALLBACK = HERE / "data_files" / "EQUITY_L_fallback.csv"
-CACHE_DIR = Path(os.getenv("JINNI_CACHE", Path.home() / ".cache" / "jinni"))
+from .paths import cache_dir  # noqa: E402
+
+CACHE_DIR = cache_dir()
 NSE_URLS = [
     "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv",
     "https://archives.nseindia.com/content/equities/EQUITY_L.csv",
@@ -139,6 +141,11 @@ def bulk_prices(tickers: list[str], period: str = "1y", chunk: int = 150, progre
     for a in ("open", "high", "low", "volume"):
         setattr(out, a, getattr(out, a).loc[:, ~getattr(out, a).columns.duplicated()])
     return out
+
+
+def bundled_universe() -> pd.DataFrame:
+    """Offline snapshot of NSE equities (used for symbol search and as a fallback list)."""
+    return _clean(pd.read_csv(FALLBACK), "bundled snapshot")
 
 
 def demo_universe(n: int = 300) -> pd.DataFrame:

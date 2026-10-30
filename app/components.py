@@ -55,39 +55,7 @@ def rules() -> dict:
 # ----------------------------------------------------------- formatting
 
 
-def inr(x: float, decimals: int = 0) -> str:
-    """Indian-style grouping with lakh/crore suffix for big numbers."""
-    if x is None or (isinstance(x, float) and not math.isfinite(x)):
-        return "—"
-    a = abs(x)
-    sign = "-" if x < 0 else ""
-    if a >= 1e7:
-        return f"{sign}₹{a / 1e7:,.2f} Cr"
-    if a >= 1e5:
-        return f"{sign}₹{a / 1e5:,.2f} L"
-    return f"{sign}₹{a:,.{decimals}f}"
-
-
-def pct(x: float, decimals: int = 2, sign: bool = False) -> str:
-    if x is None or (isinstance(x, float) and not math.isfinite(x)):
-        return "—"
-    return f"{x * 100:+.{decimals}f}%" if sign else f"{x * 100:.{decimals}f}%"
-
-
-def num(x: float, decimals: int = 2) -> str:
-    if x is None or (isinstance(x, float) and not math.isfinite(x)):
-        return "—"
-    return f"{x:,.{decimals}f}"
-
-
-def tone(x: float) -> str:
-    try:
-        return "up" if x > 0 else "down" if x < 0 else ""
-    except TypeError:
-        return ""
-
-
-# ----------------------------------------------------------- widgets
+from jinni.fmt import inr, num, pct, tone  # noqa: E402,F401  (shared with the web API)
 
 
 def kpis(items: list[tuple]) -> None:

@@ -1,15 +1,50 @@
 # JINNI · Indian Market Risk & Analytics Terminal
 
-An Aladdin-style risk and analytics platform for NSE/BSE equities, built in Python and Streamlit.
-It works on desktop and phone, and opens with an animated launch screen and a market-pulse home page.
+An Aladdin-style risk and analytics platform for NSE/BSE equities. It runs on **Vercel** as a Python API plus a
+static, mobile-first web app (installable on a phone's home screen), and opens with an animated launch screen and a
+market-pulse home page.
+
+## Deploy on Vercel
+
+1. Push this repo to GitHub and **Import Project** on [vercel.com/new](https://vercel.com/new).
+2. Leave the framework preset on **Other** (or FastAPI); there is no build command and no output directory to set.
+   Vercel detects `index.py` (FastAPI), installs `requirements.txt` on Python 3.12 (`.python-version`) and serves
+   `public/` from its CDN. Settings come from `vercel.json`.
+3. Deploy. No environment variables are required. Open the URL, then **Settings → Check live data** to confirm Yahoo
+   Finance is reachable from Vercel.
+
+What to know:
+
+| | |
+|---|---|
+| **Bundle size** | ~330 MB of the 500 MB Python limit: only NumPy, pandas, SciPy, scikit-learn, yfinance and FastAPI. Streamlit and Plotly are kept out on purpose. |
+| **Time limit** | `maxDuration` is 60 s (works on Hobby). Heavy work is split so no request nears it: the whole-market scan is driven by the browser in chunks of 100 stocks, and the deep analysis covers at most 70 stocks per request. |
+| **No server state** | Holdings, watchlist, journal and settings live in the browser (`localStorage`). Export a backup in **Settings**. |
+| **Caching** | Read-only endpoints send `s-maxage`, so Vercel's CDN serves repeat requests instantly; the function also caches downloads in memory while warm. |
+| **Data source** | Yahoo Finance via `yfinance`. Shared cloud IPs are sometimes rate-limited by Yahoo; JINNI then returns a clear "live data unavailable" message (never made-up numbers) and offers an explicit demo mode. |
+| **Stock list** | Fetched from NSE when reachable, otherwise a bundled snapshot (`jinni/data_files`), or upload `EQUITY_L.csv` in the Finder. |
+| **Security** | Strict CSP (no inline scripts, no third-party scripts: Plotly is vendored in `public/vendor`), `X-Frame-Options: DENY`, no secrets, no cookies. |
+| **Env vars** | `JINNI_DEMO=1` forces synthetic data (handy for preview deployments). |
+
+Run it locally (API and front end on one port):
 
 ```bash
-pip install -r requirements.txt
-streamlit run streamlit_app.py
+pip install -r requirements-dev.txt
+python dev.py                # http://localhost:8000   (JINNI_DEMO=1 python dev.py for offline demo data)
+pytest -q                    # 85 tests
 ```
 
-Set `JINNI_DEMO=1` to run offline on a synthetic market. The app also falls back to demo data automatically,
-with a visible **DEMO DATA** badge, if Yahoo Finance is unreachable.
+or with the Vercel CLI: `vercel dev`.
+
+### The original Streamlit UI (optional)
+
+`streamlit_app.py` and `app/` are the first version of the interface. They cannot run on Vercel (Streamlit needs a
+long-lived server), so they are not part of the deployment. To use them locally or in Codespaces:
+
+```bash
+pip install -r requirements-streamlit.txt
+streamlit run streamlit_app.py
+```
 
 ## Workspaces
 
@@ -43,10 +78,14 @@ Ideas adapted from [day-trader-skill](https://github.com/Jakeschincariol/day-tra
 ## Layout
 
 ```
-streamlit_app.py      entry point (navigation, theme, splash)
-app/                  Streamlit UI: theme.py, components.py, storage.py, views/*.py
-jinni/                engine without Streamlit: data, indicators, signals, risk, optimizer, ml, backtest, universe
-tests/                pytest suite for the engine (pytest -q)
+index.py              FastAPI entrypoint for Vercel (all /api routes)
+server/               API layer: routes_*.py return JSON "blocks"; core.py (caching, errors); figs.py (Plotly dicts)
+public/               static front end served by Vercel's CDN: index.html, css/, js/ (router, UI kit, pages), vendor/plotly
+jinni/                the engine, free of web frameworks: data, indicators, ta, patterns, signals, forecast, risk, optimizer, ml…
+vercel.json           function limits, bundle excludes, security headers
+tests/                pytest suite (engine + API + deployment wiring)
+dev.py                local server (API + public/ on one port)
+streamlit_app.py, app/   optional original Streamlit UI (see above)
 legacy/               v1 app and the original heavy requirements list
 ```
 

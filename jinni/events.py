@@ -59,9 +59,9 @@ def upcoming_events(ticker: str) -> dict:
     if demo_forced():
         return out
     try:
-        import yfinance as yf
+        from .data import _yf
 
-        cal = yf.Ticker(ticker).calendar or {}
+        cal = _yf().Ticker(ticker).calendar or {}
         e = cal.get("Earnings Date")
         if isinstance(e, (list, tuple)) and e:
             e = e[0]

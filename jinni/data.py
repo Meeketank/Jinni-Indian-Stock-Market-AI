@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -23,7 +24,14 @@ log = logging.getLogger(__name__)
 PERIOD_DAYS = {"6mo": 126, "1y": 252, "2y": 504, "3y": 756, "5y": 1260, "10y": 2520}
 
 
+# Per-request override (the web API sets this from the X-Jinni-Demo header); None = use the env var.
+DEMO_OVERRIDE: ContextVar[bool | None] = ContextVar("jinni_demo_override", default=None)
+
+
 def demo_forced() -> bool:
+    o = DEMO_OVERRIDE.get()
+    if o is not None:
+        return o
     return os.getenv("JINNI_DEMO", "").strip() in {"1", "true", "yes"}
 
 
@@ -59,9 +67,30 @@ class PriceData:
 # --------------------------------------------------------------------- live
 
 
+_YF_READY = False
+
+
+def _yf():
+    """Import yfinance once and point its caches at a writable directory (Vercel: /tmp only)."""
+    global _YF_READY
+    import yfinance as yf
+
+    if not _YF_READY:
+        try:
+            from .paths import cache_dir
+
+            loc = cache_dir() / "yfinance"
+            loc.mkdir(parents=True, exist_ok=True)
+            yf.set_tz_cache_location(str(loc))
+        except Exception:
+            pass
+        _YF_READY = True
+    return yf
+
+
 def _download_yahoo(tickers: list[str], period: str, interval: str) -> PriceData | None:
     try:
-        import yfinance as yf
+        yf = _yf()
     except ImportError:
         return None
     try:
@@ -117,12 +146,9 @@ def fetch_info(ticker: str) -> dict:
     if demo_forced():
         return _demo_info(ticker)
     try:
-        import yfinance as yf
-
-        info = yf.Ticker(ticker).info or {}
+        return _yf().Ticker(ticker).info or {}
     except Exception:
-        return _demo_info(ticker) if not _yahoo_alive() else {}
-    return info
+        return {}  # never substitute made-up fundamentals for real ones
 
 
 _ALIVE: bool | None = None
