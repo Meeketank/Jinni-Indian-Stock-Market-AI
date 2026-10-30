@@ -19,10 +19,9 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import HistGradientBoostingClassifier
-from sklearn.metrics import accuracy_score, brier_score_loss, precision_score, roc_auc_score
-
 from . import indicators as ind
+from .mlcore import GBClassifier, accuracy as accuracy_score, brier as brier_score_loss  # noqa: F401
+from .mlcore import permutation_importance, precision as precision_score, roc_auc as roc_auc_score
 
 FEATURES = [
     "ret_1", "ret_5", "ret_21", "ret_63", "rsi", "macd_hist_n", "atr_n", "dist_sma20",
@@ -72,11 +71,8 @@ def build_labels(close: pd.Series, horizon: int, bench: pd.Series | None = None,
     return lab
 
 
-def make_model() -> HistGradientBoostingClassifier:
-    return HistGradientBoostingClassifier(
-        max_depth=3, learning_rate=0.04, max_iter=250, min_samples_leaf=60,
-        l2_regularization=1.0, random_state=0,
-    )
+def make_model() -> GBClassifier:
+    return GBClassifier(max_depth=3, min_samples_leaf=60, l2=1.0, random_state=0)
 
 
 @dataclass
@@ -136,7 +132,7 @@ def walk_forward(dfs: dict[str, pd.DataFrame], bench: pd.Series | None, horizon:
             "Base rate": base,
             "Edge vs base": accuracy_score(te["label"], pred) - base,
             "AUC": roc_auc_score(te["label"], p) if te["label"].nunique() > 1 else np.nan,
-            "Precision (up)": precision_score(te["label"], pred, zero_division=0),
+            "Precision (up)": precision_score(te["label"], pred),
         })
         oos_parts.append(te[["ticker", "label", "fwd_ret"]].assign(proba=p))
     if not folds:
@@ -170,10 +166,6 @@ def walk_forward(dfs: dict[str, pd.DataFrame], bench: pd.Series | None, horizon:
     }).set_index("ticker")
 
     # Permutation importance on the most recent fold (cheap, model-agnostic)
-    from sklearn.inspection import permutation_importance
-
     last = data.iloc[-min(len(data), 3000):]
-    pi = permutation_importance(final, last[FEATURES], last["label"], n_repeats=3, random_state=0,
-                                scoring="roc_auc")
-    importance = pd.Series(pi.importances_mean, index=FEATURES).sort_values(ascending=False)
+    importance = permutation_importance(final, last[FEATURES], last["label"], n_repeats=3).sort_values(ascending=False)
     return WalkForwardResult(folds_df, oos, summary, latest_p, importance)

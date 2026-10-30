@@ -14,7 +14,8 @@ from jinni import ta
 
 UP, DOWN, GOLD, BLUE, MUTED = "#22C55E", "#EF4444", "#F5B841", "#4C8DFF", "#8A94A6"
 SERIES = ["#4C8DFF", "#F5B841", "#22C55E", "#E86AF0", "#2EC4B6", "#FF8A4C", "#A78BFA", "#94A3B8"]
-PANEL = "#111823"
+# Theme tokens: the browser swaps "var(--name)" for the active theme's colour (public/js/plot.js).
+PANEL = "var(--panel2)"
 
 
 def fig(data: list, layout: dict | None = None) -> dict:
@@ -123,7 +124,7 @@ def with_marks(f: dict, marks: list) -> dict:
 def heatmap(z, x, y, title: str = "", zmin=None, zmax=None, scale=None, texts=None, fmt: str = ".0%") -> dict:
     z = [[None if (v is None or pd.isna(v)) else float(v) for v in r] for r in np.asarray(z, dtype=float).tolist()]
     tr = {"type": "heatmap", "z": z, "x": [str(a) for a in x], "y": [str(a) for a in y], "showscale": False,
-          "colorscale": scale or [[0, "#111823"], [0.5, "#3B5B99"], [1, UP]],
+          "colorscale": scale or [[0, "var(--panel2)"], [0.5, "#3B5B99"], [1, UP]],
           "hovertemplate": "%{y} / %{x}: %{z:" + fmt + "}<extra></extra>"}
     if zmin is not None:
         tr["zmin"], tr["zmax"] = zmin, zmax
@@ -152,7 +153,7 @@ def histogram(values, nbins: int = 60, title: str = "", color: str = BLUE, marks
 
 def donut(labels, values, title: str = "", center: str = "") -> dict:
     tr = {"type": "pie", "labels": list(labels), "values": [float(v) for v in values], "hole": 0.62, "sort": False,
-          "marker": {"colors": SERIES, "line": {"color": "#0A0E14", "width": 2}}, "textinfo": "percent",
+          "marker": {"colors": SERIES, "line": {"color": "var(--panel)", "width": 2}}, "textinfo": "percent",
           "textposition": "inside"}
     lay = {"title": title}
     if center:
@@ -311,7 +312,7 @@ def price_chart(df: pd.DataFrame, overlays: list[str], panels: list[str], layers
             S.ann.append({"x": anchor.strftime("%Y-%m-%d"), "y": y, "xref": "x", "yref": "y",
                           "text": f"{p.name}{' ✓' if p.status == 'confirmed' else ''}", "showarrow": True,
                           "arrowhead": 0, "ax": 0, "ay": -26, "font": {"size": 10, "color": color},
-                          "bgcolor": "rgba(10,14,20,0.75)", "bordercolor": color, "borderwidth": 1})
+                          "bgcolor": "var(--panel)", "bordercolor": color, "borderwidth": 1})
             if p.target and in_view(p.end):
                 S.hline(float(p.target), 0, color, "dot", 1, f"{p.name} target")
 

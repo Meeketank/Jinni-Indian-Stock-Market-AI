@@ -46,6 +46,8 @@ export function md(src) {
 
 // ---------------------------------------------------------------- icons
 const ICONS = {
+  moon: '<path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
   home: '<path d="M3 11l9-8 9 8v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/>',
   target: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.4"/>',
   chart: '<path d="M7 3v18M7 8H4.5v7H7M17 2v19M17 6h-2.5v9H17"/><path d="M7 8h2.5v7H7M17 6h2.5v9H17"/>',
@@ -189,11 +191,11 @@ function block(b, ctx) {
 
 function scoreRing(b) {
   const v = Math.max(0, Math.min(100, b.value)), r = 36, c = 2 * Math.PI * r;
-  const col = v >= 60 ? '#22C55E' : v < 42 ? '#EF4444' : '#F5B841';
+  const col = v >= 60 ? 'var(--up)' : v < 42 ? 'var(--down)' : 'var(--gold)';
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   svg.setAttribute('viewBox', '0 0 84 84'); svg.setAttribute('class', 'ring');
-  svg.innerHTML = `<circle cx="42" cy="42" r="${r}" fill="none" stroke="#222D3F" stroke-width="8"/>
-    <circle cx="42" cy="42" r="${r}" fill="none" stroke="${col}" stroke-width="8" stroke-linecap="round"
+  svg.innerHTML = `<circle cx="42" cy="42" r="${r}" fill="none" style="stroke:var(--border)" stroke-width="8"/>
+    <circle cx="42" cy="42" r="${r}" fill="none" style="stroke:${col}" stroke-width="8" stroke-linecap="round"
       stroke-dasharray="${(c * v) / 100} ${c}" transform="rotate(-90 42 42)"/>
     <text x="42" y="50" text-anchor="middle">${Math.round(v)}</text>`;
   return h('div', { class: 'score' }, svg, h('div', {}, h('div', { class: 'muted', style: { fontSize: '.8rem' } }, b.label),
@@ -211,7 +213,7 @@ function tape(items) {
 }
 function newsList(items) {
   return h('ul', { class: 'news' }, items.map((n) => {
-    const col = n.score > 0.1 ? '#22C55E' : n.score < -0.1 ? '#EF4444' : '#8A94A6';
+    const col = n.score > 0.1 ? 'var(--up)' : n.score < -0.1 ? 'var(--down)' : 'var(--muted)';
     return h('li', {}, h('span', { class: 'dot', style: { background: col }, title: `tone ${n.score?.toFixed?.(2)}` }),
       h('div', {}, h('div', { class: 'meta' }, [n.time ? F.date(n.time) + (String(n.time).length > 10 ? ' ' + String(n.time).slice(11, 16) : '') : '', n.ticker].filter(Boolean).join(' · ')),
         h('a', { href: safeUrl(n.link), target: '_blank', rel: 'noopener noreferrer' }, n.headline),
@@ -270,7 +272,7 @@ function cellFor(c, r, i, wrap) {
     }
     case 'tone': {
       const w = Math.min(Math.abs(v), 1) * 50;
-      td.append(h('span', { class: 'tonebar' }, h('span', { class: 'track' }, h('i', { style: { left: v >= 0 ? '50%' : `${50 - w}%`, width: `${w}%`, background: v >= 0 ? '#22C55E' : '#EF4444' } })),
+      td.append(h('span', { class: 'tonebar' }, h('span', { class: 'track' }, h('i', { style: { left: v >= 0 ? '50%' : `${50 - w}%`, width: `${w}%`, background: v >= 0 ? 'var(--up)' : 'var(--down)' } })),
         h('span', { class: F.toneClass(v) }, F.plain(k, v)))); break;
     }
     case 'spct1': case 'spct2': case 'n1signed': td.append(h('span', { class: F.toneClass(v) }, F.plain(k, v))); break;

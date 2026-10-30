@@ -262,10 +262,8 @@ class MLHit:
 
 def ml_hit_model(dfs: dict[str, pd.DataFrame], bench: pd.Series | None, horizon: int, target: float,
                  stop: float | None, n_splits: int = 4) -> MLHit:
-    from sklearn.isotonic import IsotonicRegression
-    from sklearn.metrics import brier_score_loss, roc_auc_score
-
     from .ml import FEATURES, build_features, make_model
+    from .mlcore import IsotonicCalibrator, brier as brier_score_loss, roc_auc as roc_auc_score
 
     frames, latest = [], []
     for t, df in dfs.items():
@@ -297,7 +295,7 @@ def ml_hit_model(dfs: dict[str, pd.DataFrame], bench: pd.Series | None, horizon:
         raise ValueError("ML walk-forward produced no folds.")
     oos = pd.concat(oos)
     auc = roc_auc_score(oos["label"], oos["p"]) if oos["label"].nunique() > 1 else 0.5
-    iso = IsotonicRegression(out_of_bounds="clip", y_min=0.001, y_max=0.999).fit(oos["p"], oos["label"])
+    iso = IsotonicCalibrator(y_min=0.001, y_max=0.999).fit(oos["p"], oos["label"])
     cal = iso.predict(oos["p"])
     brier = brier_score_loss(oos["label"], cal)
     oos["bucket"] = pd.qcut(oos["p"], 5, labels=False, duplicates="drop")

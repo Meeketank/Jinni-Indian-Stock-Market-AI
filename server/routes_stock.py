@@ -136,8 +136,8 @@ def overview(t: str):
     vals = [float(last[k]) for k in signals.WEIGHTS] + ([fund_score] if fund_score is not None else [])
     radar = figs.fig([{"type": "scatterpolar", "r": vals + vals[:1], "theta": cats + cats[:1], "fill": "toself",
                        "line": {"color": figs.GOLD}, "fillcolor": "rgba(245,184,65,0.18)"}],
-                     {"polar": {"bgcolor": "rgba(0,0,0,0)", "radialaxis": {"range": [0, 100], "gridcolor": "#1A2433"},
-                                "angularaxis": {"gridcolor": "#1A2433"}}, "showlegend": False,
+                     {"polar": {"bgcolor": "rgba(0,0,0,0)", "radialaxis": {"range": [0, 100], "gridcolor": "var(--grid)"},
+                                "angularaxis": {"gridcolor": "var(--grid)"}}, "showlegend": False,
                       "title": "Factor profile (0–100)"})
     sc = scores.iloc[-504:]
     hist = figs.lines(sc.index, {"Composite": dict(y=sc["Composite"], color=figs.GOLD, width=2.2)}, "Score over time",

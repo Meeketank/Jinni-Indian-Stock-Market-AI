@@ -39,11 +39,10 @@ def portfolio_returns(rets: pd.DataFrame, weights: pd.Series) -> pd.Series:
 
 def ledoit_wolf_cov(rets: pd.DataFrame) -> pd.DataFrame:
     """Shrinkage covariance (Ledoit-Wolf), daily units. Robust with few observations."""
-    from sklearn.covariance import LedoitWolf
+    from .mlcore import ledoit_wolf_cov as _lw
 
     clean = rets.dropna()
-    lw = LedoitWolf().fit(clean.values)
-    return pd.DataFrame(lw.covariance_, index=rets.columns, columns=rets.columns)
+    return pd.DataFrame(_lw(clean.values), index=rets.columns, columns=rets.columns)
 
 
 def ewma_cov(rets: pd.DataFrame, lam: float = 0.94) -> pd.DataFrame:

@@ -1,6 +1,7 @@
 // App shell: hash router, navigation (bottom tabs on phones, top bar on desktop), splash, demo banner.
 import { h, icon, sheet, button } from './ui.js';
 import { store } from './store.js';
+import { toggle, isDark } from './theme.js';
 
 const NAV = [
   { id: 'home', label: 'Home', icon: 'home', primary: true, desc: 'Market pulse' },
@@ -78,6 +79,12 @@ function splash() {
   setTimeout(done, 3200);
 }
 
-banner(); splash();
+function themeBtn() {
+  const b = document.getElementById('theme-btn'); if (!b) return;
+  const paint = () => { b.replaceChildren(icon(isDark() ? 'sun' : 'moon')); b.title = isDark() ? 'Switch to light mode' : 'Switch to dark mode'; };
+  b.addEventListener('click', toggle); window.addEventListener('jinni:theme', paint); paint();
+}
+
+themeBtn(); banner(); splash();
 window.addEventListener('hashchange', route);
 route();

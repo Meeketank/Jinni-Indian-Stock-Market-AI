@@ -1,10 +1,11 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "fastapi",
   "functions": {
     "index.py": {
       "maxDuration": 60,
       "includeFiles": "jinni/data_files/**",
-      "excludeFiles": "{tests/**,legacy/**,app/**,assets/**,docs/**,.devcontainer/**,.streamlit/**,public/**,*.md,streamlit_app.py,dev.py,main.py,run.py,config.py,firebase_config.py,risk_analytics.py,portfolio_optimizer.py,continuous_learner.py,advanced_models.py,autonomous_market_analyzer.py,automated_retraining.py,recommendation_engine.py,local_storage.py,performance_tracker.py,online_learning/**,ml_models/**,analytics/**,data_scraper/**,dashboard/**,utils/**}"
+      "excludeFiles": "{!(index).py,tests/**,legacy/**,app/**,assets/**,public/**,analytics/**,ml_models/**,online_learning/**,data_scraper/**,dashboard/**,utils/**,scripts/**,docs/**,.github/**,.devcontainer/**,.streamlit/**,*.md}"
     }
   },
   "headers": [

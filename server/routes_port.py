@@ -246,7 +246,7 @@ def portfolio_risk(req: RiskReq):
     labels = [display_name(t) for t in corr.index]
     avg_corr = float(corr.values[np.triu_indices_from(corr.values, 1)].mean()) if len(corr) > 1 else float("nan")
     hm = figs.heatmap(corr.values, labels, labels, f"Correlation (avg {avg_corr:.2f})", -1, 1,
-                      [[0, figs.BLUE], [0.5, "#111823"], [1, figs.DOWN]], fmt=".2f")
+                      [[0, figs.BLUE], [0.5, "var(--panel2)"], [1, figs.DOWN]], fmt=".2f")
     t_dec = [plot(gp, max(320, 28 * len(rc_) + 80)),
              caption("A position whose gold bar is longer than its blue bar adds more risk than its capital share. Euler "
                      "decomposition: contributions sum exactly to portfolio volatility."), plot(hm, 420)]
@@ -386,10 +386,10 @@ def optimizer(req: OptReq):
                  "y": figs._v(mu.reindex(rets.columns).values), "text": [display_name(t) for t in rets.columns],
                  "textposition": "top center", "textfont": {"size": 9, "color": figs.MUTED}, "marker": {"color": figs.MUTED, "size": 7}})
     for key, colr, sym in [("max_sharpe", figs.UP, "star"), ("min_vol", figs.BLUE, "diamond"),
-                           ("risk_parity", "#E86AF0", "circle"), ("equal", "#FFFFFF", "x")]:
+                           ("risk_parity", "#E86AF0", "circle"), ("equal", "var(--text)", "x")]:
         r = opt.optimize(rets, key, **kw)
         data.append({"type": "scatter", "mode": "markers", "name": opt.OBJECTIVES[key], "x": [r.volatility], "y": [r.exp_return],
-                     "marker": {"color": colr, "size": 14, "symbol": sym, "line": {"width": 1, "color": "#0A0E14"}}})
+                     "marker": {"color": colr, "size": 14, "symbol": sym, "line": {"width": 1, "color": "var(--panel)"}}})
     if not fr.empty:
         best = fr.loc[fr["Sharpe"].idxmax()]
         xs = np.linspace(0, fr["Volatility"].max() * 1.1, 20)

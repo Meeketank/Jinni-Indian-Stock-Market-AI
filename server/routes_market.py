@@ -149,7 +149,7 @@ def home():
         z = sdf.values * 100
         lim = max(1.0, float(np.nanmax(np.abs(z))))
         f = figs.heatmap(z, sdf.columns, sdf.index, "Sector rotation", -lim, lim,
-                         [[0, figs.DOWN], [0.5, "#1A2433"], [1, figs.UP]],
+                         [[0, figs.DOWN], [0.5, "var(--panel2)"], [1, figs.UP]],
                          [[f"{v:+.1f}%" for v in r] for r in z], fmt=".1f")
         right.append(plot(f, 340))
     blocks.append(cols(left, right, ratio=[3, 2]))

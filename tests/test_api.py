@@ -205,8 +205,26 @@ def test_vercel_config_is_valid():
 def test_runtime_requirements_are_lean():
     names = {re.split(r"[<>=~! ]", ln.strip())[0].lower() for ln in (ROOT / "requirements.txt").read_text().splitlines()
              if ln.strip() and not ln.startswith("#")}
-    assert {"fastapi", "numpy", "pandas", "scipy", "scikit-learn", "yfinance"} <= names
-    assert not names & {"streamlit", "plotly", "tensorflow", "torch", "xgboost"}  # would blow Vercel's 500 MB limit
+    assert {"fastapi", "numpy", "pandas", "scipy", "yfinance"} <= names
+    assert not names & {"streamlit", "plotly", "scikit-learn", "tensorflow", "torch", "xgboost"}  # blow the size limit
+
+
+def test_pyproject_dependencies_match_requirements():
+    """Vercel installs from pyproject.toml (+ uv.lock); pip users from requirements.txt. They must agree."""
+    import tomllib
+
+    py = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    req = [ln.strip() for ln in (ROOT / "requirements.txt").read_text().splitlines()
+           if ln.strip() and not ln.startswith("#")]
+    assert sorted(py["project"]["dependencies"]) == sorted(req)
+    assert py["tool"]["vercel"]["entrypoint"] == "index:app"
+    assert (ROOT / "uv.lock").exists()
+
+
+def test_vercel_exclude_pattern_fits_the_256_char_limit():
+    cfg = json.loads((ROOT / "vercel.json").read_text())
+    assert len(cfg["functions"]["index.py"]["excludeFiles"]) <= 256  # Vercel rejects longer patterns
+    assert cfg["framework"] == "fastapi"
 
 
 def test_static_site_wiring():
@@ -229,3 +247,15 @@ def test_no_secrets_or_streamlit_in_runtime_path():
     for f in ("index.py", *[p.relative_to(ROOT).as_posix() for p in (ROOT / "server").glob("*.py")]):
         src = (ROOT / f).read_text()
         assert "import streamlit" not in src and "import plotly" not in src, f
+
+
+def test_light_theme_is_default_and_csp_safe():
+    html = (ROOT / "public" / "index.html").read_text()
+    css = (ROOT / "public" / "css" / "app.css").read_text()
+    assert '<script src="/js/theme-init.js"></script>' in html and "<script>" not in html  # no inline script (CSP)
+    root = css[css.index(":root"):css.index("}", css.index(":root")) + 1]
+    assert "--bg:#F4F6FA" in root.replace(" ", "")                    # light palette by default
+    assert ':root[data-theme="dark"]' in css
+    init = (ROOT / "public" / "js" / "theme-init.js").read_text()
+    assert "'light'" in init                                          # default mode
+    assert json.loads((ROOT / "public" / "manifest.webmanifest").read_text())["theme_color"] == "#F4F6FA"

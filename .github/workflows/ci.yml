@@ -2,6 +2,7 @@ name: CI
 on:
   push:
   pull_request:
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -9,10 +10,28 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"   # same as Vercel's default runtime
-          cache: pip
-          cache-dependency-path: requirements*.txt
-      - run: pip install -r requirements-dev.txt
+          python-version: "3.12"   # same as Vercel's runtime (.python-version)
+      - run: pip install uv
+      - run: uv lock --check       # uv.lock must match pyproject.toml
+      # Install exactly what Vercel will run in production (the lockfile), then the test-only extras.
+      - run: uv export --frozen --no-hashes --no-emit-project > /tmp/prod.txt && uv pip install --system -r /tmp/prod.txt
+      - run: uv pip install --system pytest httpx uvicorn scikit-learn
       - run: pytest -q
         env:
           JINNI_DEMO: "1"           # tests never touch the network
+
+  bundle-size:
+    # Vercel's Python functions are limited to 225 MiB uncompressed; fail early if we drift toward it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install uv
+      - run: |
+          uv export --frozen --no-hashes --no-emit-project > /tmp/prod.txt
+          uv venv .bundle-venv
+          uv pip install --python .bundle-venv/bin/python -r /tmp/prod.txt
+      - run: .bundle-venv/bin/python scripts/vercel_prune.py
+      - run: .bundle-venv/bin/python scripts/check_bundle_size.py

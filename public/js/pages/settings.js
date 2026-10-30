@@ -1,10 +1,17 @@
 import { h, pageHead, NumberInput, Slider, Toggle, card, formGrid, button, disclaimer, toast, download, FileText, Results, renderBlocks } from '../ui.js';
 import { get, clearCache } from '../api.js';
 import { store, DEFAULT_RULES } from '../store.js';
+import { mode, setMode } from '../theme.js';
 
 export async function render(view) {
   view.append(pageHead('Settings', 'Assumptions and rules apply across the app. Everything is stored in this browser only.'));
   const s = store.settings();
+  const cur = mode();
+  const seg = h('div', { class: 'row' }, [['light', 'Light'], ['dark', 'Dark'], ['auto', 'Match device']].map(([m, t]) => {
+    const b = button(t, () => { setMode(m); seg.querySelectorAll('button').forEach((x) => x.classList.toggle('primary', x === b)); }, m === cur ? 'primary' : '');
+    return b;
+  }));
+  view.append(card(h('h3', {}, 'Appearance'), seg));
   const rf = NumberInput({ label: 'Risk-free rate (annual %)', value: +(s.rf * 100).toFixed(2), min: 0, max: 15, step: 0.05, help: 'Used for Sharpe, Sortino and alpha. Default ≈ India 91-day T-bill / 10Y G-Sec.' });
   const cap = NumberInput({ label: 'Default capital (₹)', value: s.capital, min: 10000, step: 50000 });
   const rk = NumberInput({ label: 'Risk per trade (%)', value: +(s.risk_pct * 100).toFixed(2), min: 0.1, max: 5, step: 0.1 });

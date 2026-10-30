@@ -1,9 +1,8 @@
 # Runtime dependencies for the Vercel deployment (index.py + jinni/ + server/).
-# Deliberately lean: Vercel bundles everything listed here (limit 500 MB; this set is ~330 MB).
+# Deliberately lean: Vercel bundles everything listed here (Vercel's Python limit is 225 MB uncompressed; see scripts/vercel_prune.py).
 # Streamlit and Plotly are NOT needed by the web API and live in requirements-streamlit.txt.
 fastapi>=0.115,<1
 numpy>=2.0,<3
 pandas>=2.2,<4
 scipy>=1.13,<2
-scikit-learn>=1.5,<2
 yfinance>=0.2.54,<2
