@@ -1,3 +1,66 @@
+# JINNI · Indian Market Risk & Analytics Terminal
+
+An Aladdin-style risk and analytics platform for NSE/BSE equities, built in Python and Streamlit.
+It works on desktop and phone, and opens with an animated launch screen and a market-pulse home page.
+
+```bash
+pip install -r requirements.txt
+streamlit run streamlit_app.py
+```
+
+Set `JINNI_DEMO=1` to run offline on a synthetic market. The app also falls back to demo data automatically,
+with a visible **DEMO DATA** badge, if Yahoo Finance is unreachable.
+
+## Workspaces
+
+| Page | What it does |
+|---|---|
+| **Return Finder** | Pick a goal (+2/5/10/15%/custom within 1 week to 3 months, auto/fixed/no stop). Every stock gets P(target first), P(stop first), P(touch), expected return after costs, an A–D grade and a plain verdict, from three engines: a **Time Machine** (4,000 volatility-rescaled block-bootstrap paths of the stock's own daily bars, stop checked before target, gaps fill at the open), **history replay** (every past day and "days like today", shrunk for small samples) and a **calibrated ML model** that only gets blend weight in proportion to its walk-forward AUC. Deep dive: price cone, engine breakdown, setup history, odds grid, sizing that names the deciding limit, PASS/WARN/BLOCK risk gate, portfolio VaR impact, news and results-date warnings |
+| **Analyzer: 360° view** | Past (1-year return, this month's history, drawdown), present (87-indicator summary, active patterns, news tone) and future (odds of +5% in a month, price range, events ahead) combined into one 360° score |
+| **Analyzer: Chart** | 35 overlays and 52 indicator panels (every MA type, SuperTrend, PSAR, Ichimoku, Keltner, Donchian, StochRSI, TSI, KST, Fisher, Connors RSI, MFI, CMF, Klinger, volatility estimators…), Heikin-Ashi, zoom, and auto-drawn patterns |
+| **Analyzer: Patterns** | 45 candlestick patterns; double/triple tops & bottoms, head & shoulders, triangles, wedges, channels, rectangles, broadening, flags, pennants, cup & handle, rounding tops/bottoms; Gartley, Bat, Butterfly, Crab, Shark, AB=CD; Elliott impulse (rule-checked); RSI/MACD divergences; classified gaps; trendlines; Fibonacci; S/R zones. Each with target and invalidation, plus how it performed on this stock historically (look-ahead-free replay) |
+| **Sentiment & Events** | Market mood index (momentum, VIX, breadth, new highs/lows, equity vs gold), news tone per stock, an **Event lab** ("2nd Friday of every month", Budget, RBI, Fed, elections, or any pasted dates → did the market react, how often, could it be luck), calendar effects with multiple-testing correction, and upcoming events |
+| **Whole-market scan + budget** | Return Finder can scan every NSE-listed stock (live list from NSE, bundled fallback, or uploaded CSV): stage 1 filters ~2,000 stocks on budget, price, liquidity and circuit locks; stage 2 runs the three engines on the best N. Enter a budget and get a whole-share plan with the basket simulated jointly: odds of reaching the target, chance of loss, and bad/good cases in rupees |
+| **Journal** | Tracks predictions and paper trade plans, scores them against the real price path afterwards (target / stop / expired), and shows hit rate vs predicted, calibration and results by grade |
+| **Home** | Index ticker tape, market regime (NIFTY trend), India VIX, breadth, advance/decline, sector-rotation heatmap, top movers |
+| **Analyzer** | Candlestick chart with overlays (SMA/EMA/Bollinger/VWAP) and RSI/MACD/ADX panels, a 5-factor rating (Trend, Momentum, Timing, Volume, Risk + fundamentals), ATR/structure-based trade plan with position sizing, pivots and swing levels, and the **measured** forward returns after each past rating |
+| **Screener** | Scores the NIFTY 50, your watchlist or a custom list. Filters, CSV export, momentum-vs-risk map, sector scores |
+| **Risk** | Holdings editor (CSV import/export), live P&L, VaR/CVaR four ways (historical, Gaussian, Cornish-Fisher, Monte Carlo Student-t), Kupiec VaR backtest, Euler risk contribution, correlation, beta/idiosyncratic split, historical stress replay (COVID 2020, 2022 rate shock, Adani-Hindenburg, 2024 election day, …), beta shocks, drawdowns, rolling beta, liquidity / days-to-exit |
+| **Optimizer** | Max-Sharpe, min-volatility, risk parity, max diversification. Ledoit-Wolf covariance, CAPM-implied or shrunk expected returns, per-stock and sector caps, efficient frontier, whole-share allocation and a rebalance trade list with Indian cost estimates |
+| **Lab** | Backtests five rules net of costs (no look-ahead) and a gradient-boosting model validated **walk-forward with a purge gap**, reported against the base rate with AUC, Brier, quintile returns and feature importance |
+
+Ideas adapted from [day-trader-skill](https://github.com/Jakeschincariol/day-trader-skill) for NSE daily bars: the Time Machine replay and its break-even verdict (a target S/X away must come first in S/(X+S) of decided cases), sizing to a max loss that names the deciding limit, a PASS/BLOCK risk gate, setup scans, news tagging, and "never round a coin flip up into an edge".
+
+## Accuracy fixes vs v1
+
+* **ML leakage removed.** v1 scored the model with a random train/test split on overlapping windows, which inflates accuracy. v2 uses purged walk-forward validation and scale-free features.
+* **Wilder smoothing** for RSI/ATR/ADX, matching TradingView and Kite.
+* **VaR**: real portfolio weights instead of equal weights; multi-day VaR from actual h-day returns, not √t scaling; fat-tail models; a backtest of the VaR itself.
+* **Indian risk-free rate** (6.5% default, configurable) instead of 2%.
+* **Tickers**: HDFC→HDFCBANK, ZOMATO→ETERNAL and TATAMOTORS→TMPV aliases; current NIFTY 50 list.
+* The invented "confidence %" is replaced by transparent factor scores plus measured hit-rates.
+
+## Layout
+
+```
+streamlit_app.py      entry point (navigation, theme, splash)
+app/                  Streamlit UI: theme.py, components.py, storage.py, views/*.py
+jinni/                engine without Streamlit: data, indicators, signals, risk, optimizer, ml, backtest, universe
+tests/                pytest suite for the engine (pytest -q)
+legacy/               v1 app and the original heavy requirements list
+```
+
+Older experimental modules (`main.py`, `ml_models/`, `online_learning/`, …) are left untouched. They are not used by the app,
+and some import modules that do not exist in the repo.
+
+## Disclaimer
+
+For analytics and education only. Not investment advice; not a SEBI-registered adviser. Data from Yahoo Finance may be delayed.
+
+---
+
+<details><summary>Original README (v1)</summary>
+
 # 🧞 Jinni - Indian Stock Market AI
 
 **AI-Powered Real-Time Indian Stock Market Analysis & Prediction System**
@@ -289,3 +352,5 @@ For questions or issues:
 ---
 
 **Built with ❤️ for the Indian Stock Market**
+
+</details>
