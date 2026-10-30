@@ -1,11 +1,5 @@
 // Everything the user owns lives in this browser (localStorage). The server is stateless.
 const P = 'jinni.';
-const SAMPLE_HOLDINGS = [
-  ['RELIANCE.NS', 40, 1250], ['HDFCBANK.NS', 50, 800], ['ICICIBANK.NS', 60, 1150], ['INFY.NS', 45, 1500],
-  ['TCS.NS', 18, 3600], ['BHARTIARTL.NS', 35, 1500], ['LT.NS', 20, 3300], ['ITC.NS', 150, 420],
-  ['SUNPHARMA.NS', 40, 1600], ['MARUTI.NS', 5, 11500],
-].map(([ticker, quantity, avg_cost]) => ({ ticker, quantity, avg_cost }));
-
 export const DEFAULT_RULES = {
   max_loss_per_trade: 10000, max_position_pct: 0.10, max_sector_pct: 0.35, min_reward_risk: 1.5,
   cash_buffer_pct: 0.05, max_open_trades: 8, min_probability: 0.0, require_stop: true,
@@ -24,7 +18,7 @@ export const store = {
   saveSettings(patch) { const s = { ...this.settings(), ...patch }; write('settings', s); return s; },
   rules: () => ({ ...DEFAULT_RULES, ...read('rules', {}) }),
   saveRules(r) { write('rules', r); },
-  holdings: () => read('holdings', null) || SAMPLE_HOLDINGS.map((h) => ({ ...h })),
+  holdings: () => read('holdings', null) || [],
   hasOwnHoldings: () => read('holdings', null) !== null,
   saveHoldings(h) { write('holdings', h); },
   resetHoldings() { try { localStorage.removeItem(P + 'holdings'); } catch { /* ignore */ } },

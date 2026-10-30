@@ -139,7 +139,7 @@ def gauge(value: float, rng, title: str, subtitle: str, color: str = GOLD, steps
           "title": {"text": f"{title}<br><span style='font-size:12px'>{subtitle}</span>"},
           "gauge": {"axis": {"range": list(rng), "tickvals": ticks}, "bar": {"color": color}, "bgcolor": PANEL,
                     "borderwidth": 0, "steps": steps or []}}
-    return fig([tr], {"margin": {"l": 24, "r": 24, "t": 60, "b": 10}})
+    return fig([tr], {"margin": {"l": 28, "r": 28, "t": 96, "b": 14}})
 
 
 def histogram(values, nbins: int = 60, title: str = "", color: str = BLUE, marks=None) -> dict:

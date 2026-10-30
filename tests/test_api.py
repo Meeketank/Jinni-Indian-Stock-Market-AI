@@ -49,12 +49,12 @@ def walk_blocks(blocks):
 
 
 GET_ENDPOINTS = [
-    "/api/health", "/api/catalog", "/api/search?q=tata", "/api/home", "/api/mood", "/api/news?tickers=^NSEI,TCS",
+    "/api/health", "/api/catalog", "/api/search?q=tata", "/api/home/pulse", "/api/home/sectors", "/api/home/movers", "/api/home/nifty50", "/api/mood", "/api/news?tickers=^NSEI,TCS",
     f"/api/stock/{T}/overview", f"/api/stock/{T}/chart", f"/api/stock/{T}/patterns", f"/api/stock/{T}/indicators",
     f"/api/stock/{T}/odds?target=0.07&hz=10", f"/api/stock/{T}/seasonality", f"/api/stock/{T}/plan?side=SHORT",
     f"/api/stock/{T}/fundamentals", f"/api/stock/{T}/news",
     f"/api/stock/{T}/chart?overlays=Ichimoku,SuperTrend,Parabolic SAR&panels=Stochastic,ADX / DMI,Klinger oscillator"
-    "&layers=Candlestick patterns,Chart patterns,Harmonics %26 Elliott,Trendlines,Fibonacci,Gaps,Divergences&zoom=1Y&heikin=1",
+    "&layers=Candlestick patterns,Chart patterns,Harmonics %26 Elliott,Trendlines,Fibonacci,Gaps,Divergences&n=1&unit=year&heikin=1",
     "/api/events/study?symbol=^NSEI&mode=rule&nth=2nd&day=Friday",
     "/api/events/study?symbol=^NSEI&mode=builtin&event=Union Budget day",
     "/api/events/study?symbol=^NSEI&mode=dates&dates=2025-04-02,2025-07-07&offset=1", "/api/events/calendar?symbol=^NSEI",
@@ -88,7 +88,7 @@ def test_plot_blocks_have_traces(client):
     body = client.get(f"/api/stock/{T}/chart").json()
     plots = [b for b in walk_blocks(body["blocks"]) if b["type"] == "plot"]
     assert plots and plots[0]["fig"]["data"][0]["type"] == "candlestick"
-    assert len(plots[0]["fig"]["data"][0]["close"]) == 126
+    assert 120 <= len(plots[0]["fig"]["data"][0]["close"]) <= 135  # default span: 6 months
 
 
 def test_market_scan_and_finder_flow(client):
@@ -259,3 +259,100 @@ def test_light_theme_is_default_and_csp_safe():
     init = (ROOT / "public" / "js" / "theme-init.js").read_text()
     assert "'light'" in init                                          # default mode
     assert json.loads((ROOT / "public" / "manifest.webmanifest").read_text())["theme_color"] == "#F4F6FA"
+
+
+def _candles(client, qs):
+    body = client.get(f"/api/stock/{T}/chart?{qs}").json()
+    return [b for b in walk_blocks(body["blocks"]) if b["type"] == "plot"][0]["fig"]
+
+
+def test_chart_range_is_count_plus_unit(client):
+    sizes = {}
+    for n, unit in [(10, "day"), (3, "week"), (3, "month"), (1, "quarter"), (1, "year"), (1, "fy")]:
+        f = _candles(client, f"n={n}&unit={unit}")
+        sizes[(n, unit)] = len(f["data"][0]["close"])
+    assert 6 <= sizes[(10, "day")] <= 9                       # 10 calendar days
+    assert sizes[(3, "week")] < sizes[(3, "month")] <= sizes[(1, "year")]
+    assert abs(sizes[(3, "month")] - sizes[(1, "quarter")]) <= 3
+    assert client.get(f"/api/stock/{T}/chart?n=2&unit=fortnight").status_code == 422
+
+
+def test_patterns_tab_draws_a_chart_and_follows_the_range(client):
+    for qs in ("n=3&unit=month", "n=2&unit=year"):
+        body = client.get(f"/api/stock/{T}/patterns?{qs}").json()
+        kinds = [b["type"] for b in walk_blocks(body["blocks"])]
+        assert "plot" in kinds and "table" in kinds
+
+
+def test_pattern_detection_is_scoped_to_the_window():
+    from jinni import data as jd
+    from jinni import patterns as jp
+
+    df = jd.get_prices(["TCS.NS"], "5y").ohlcv("TCS.NS")
+    short, long_ = jp.scan_window(df, 63), jp.scan_window(df, 1000)
+    assert short["bars"] == 63 and long_["bars"] == 1000
+    assert min(p.i for p in short["pivots"]) >= 0 and len(short["pivots"]) != len(long_["pivots"])
+    names = lambda s: sorted(p.name for p in s["chart"] + s["trend"])  # noqa: E731
+    assert names(short) != names(long_)
+
+
+def test_span_start_handles_financial_year_and_units():
+    import pandas as pd
+
+    from server.core import span_bars, span_start
+
+    last = pd.Timestamp("2026-10-30")
+    assert span_start(last, 1, "fy") == pd.Timestamp("2026-04-01")
+    assert span_start(pd.Timestamp("2026-02-10"), 1, "fy") == pd.Timestamp("2025-04-01")
+    assert span_start(last, 2, "fy") == pd.Timestamp("2025-04-01")
+    assert span_start(last, 1, "quarter") == pd.Timestamp("2026-07-30")
+    assert span_start(last, 2, "week") == pd.Timestamp("2026-10-16")
+    df = pd.DataFrame({"Close": range(100)}, index=pd.bdate_range(end=last, periods=100))
+    assert span_bars(df, 1, "day", minimum=5) == 5  # never fewer than the minimum
+    assert span_bars(df, 50, "year") == 100
+
+
+def test_nse_movers_come_from_the_live_screener(client, monkeypatch):
+    from jinni import live
+    from server import routes_market  # noqa: F401
+
+    quotes = [{"symbol": "AAA.NS", "shortName": "Aaa Ltd", "regularMarketPrice": 120.5, "regularMarketChange": 5,
+               "regularMarketChangePercent": 4.3, "regularMarketVolume": 1_000_000, "marketCap": 5e10,
+               "fiftyTwoWeekHigh": 150, "trailingPE": 18.2}]
+
+    class FakeYF:
+        calls = []
+
+        def screen(self, q, size=0, sortField=None, sortAsc=None):
+            FakeYF.calls.append((sortField, sortAsc))
+            return {"quotes": quotes}
+
+    monkeypatch.setattr(live, "_yf", lambda: FakeYF())
+    monkeypatch.setattr(live, "demo_forced", lambda: False)
+    monkeypatch.setattr(routes_market.jdata, "demo_forced", lambda: False)
+    df = live.board("gainers")
+    assert list(df["t"]) == ["AAA.NS"] and abs(df.loc[0, "1D"] - 0.043) < 1e-9
+    assert ("percentchange", False) in FakeYF.calls
+    live.board("losers")
+    assert ("percentchange", True) in FakeYF.calls
+
+    class Boom:
+        def screen(self, *a, **k):
+            raise RuntimeError("429")
+
+    monkeypatch.setattr(live, "_yf", lambda: Boom())
+    assert live.board("gainers") is None  # never invents rows
+
+
+def test_no_hardcoded_sample_data_in_the_front_end():
+    store = (ROOT / "public" / "js" / "store.js").read_text()
+    assert "SAMPLE_HOLDINGS" not in store and "RELIANCE" not in store
+    assert "IRCTC, HAL" not in (ROOT / "public" / "js" / "pages" / "finder.js").read_text().replace("e.g. IRCTC, HAL, TRENT", "")
+
+
+def test_phone_layout_guards_are_in_place():
+    css = (ROOT / "public" / "css" / "app.css").read_text()
+    ui = (ROOT / "public" / "js" / "ui.js").read_text()
+    assert "overflow-x: hidden" in css and "touch-action: manipulation" in css
+    assert re.search(r"max-width: 640px\) \{\s*input\[type=text\].*font-size: 16px", css, re.S)  # no iOS focus-zoom
+    assert "tcards" in css and "as-cards" in ui                                                         # tables become cards

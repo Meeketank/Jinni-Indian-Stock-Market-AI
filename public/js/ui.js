@@ -223,26 +223,29 @@ function newsList(items) {
 
 // --------------------------------------------------------------- tables
 const LEFT = new Set(['text', 'badge', 'grade', 'date', 'link']);
+const phone = window.matchMedia('(max-width: 640px)');
 function tableBlock(b, ctx) {
   const cols = b.columns; let rows = (b.rows || []).slice();
   if (!rows.length) return h('div', { class: 'caption' }, b.empty || 'Nothing to show.');
   let sort = b.sort ? { key: b.sort[0], desc: !!b.sort[1] } : null; let selected = null;
   const longText = (c) => c.fmt === 'text' && rows.slice(0, 20).some((r) => String(r[c.key] ?? '').length > 45);
   const wrapCols = new Set(cols.filter(longText).map((c) => c.key));
-  const tbody = h('tbody'); const headRow = h('tr');
-  const draw = () => {
-    const sorted = sort ? rows.slice().sort((a, bb) => {
-      const x = a[sort.key], y = bb[sort.key];
-      if (x === null || x === undefined) return 1; if (y === null || y === undefined) return -1;
-      const d = typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y));
-      return sort.desc ? -d : d;
-    }) : rows;
-    tbody.replaceChildren(...sorted.map((r) => {
+  const tbody = h('tbody'); const headRow = h('tr'); const cards = h('div', { class: 'tcards' });
+  const sorted = () => (sort ? rows.slice().sort((a, bb) => {
+    const x = a[sort.key], y = bb[sort.key];
+    if (x === null || x === undefined) return 1; if (y === null || y === undefined) return -1;
+    const d = typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y));
+    return sort.desc ? -d : d;
+  }) : rows);
+  const pick = (r, el, root) => {
+    if (!b.select) return;
+    selected = r[b.select.key]; root.querySelectorAll('.sel').forEach((x) => x.classList.remove('sel')); el.classList.add('sel');
+    ctx.onSelect?.(b.select.action, r[b.select.key], r);
+  };
+  const drawTable = () => {
+    tbody.replaceChildren(...sorted().map((r) => {
       const tr = h('tr', { class: b.select ? 'click' : '' }, cols.map((c, i) => cellFor(c, r, i, wrapCols.has(c.key))));
-      if (b.select) tr.addEventListener('click', () => {
-        selected = r[b.select.key]; tbody.querySelectorAll('tr.sel').forEach((x) => x.classList.remove('sel')); tr.classList.add('sel');
-        ctx.onSelect?.(b.select.action, r[b.select.key], r);
-      });
+      if (b.select) tr.addEventListener('click', () => pick(r, tr, tbody));
       if (selected !== null && r[b.select?.key] === selected) tr.classList.add('sel');
       return tr;
     }));
@@ -251,11 +254,38 @@ function tableBlock(b, ctx) {
       if (sort && sort.key === cols[i].key) th.append(h('span', { class: 'arr' }, sort.desc ? '▼' : '▲'));
     });
   };
+  // Phones: one card per row (title = first column, the rest as label/value pairs) instead of a sideways-scrolling table.
+  const drawCards = () => {
+    cards.replaceChildren(...sorted().map((r) => {
+      const [first, ...rest] = cols;
+      const card = h('div', { class: `tcard${b.select ? ' click' : ''}` });
+      const head = cellFor(first, r, 0, false); head.className = 'tc-title';
+      card.append(h('div', { class: 'tc-head' }, h('div', { class: 'tc-title' }, ...head.childNodes)));
+      const grid = h('div', { class: 'tc-grid' });
+      for (const c of rest) {
+        const v = r[c.key]; if (v === null || v === undefined || v === '') continue;
+        const td = cellFor(c, r, 1, false);
+        const long = c.fmt === 'text' && String(v).length > 28;
+        grid.append(h('div', { class: `tc-item${long ? ' long' : ''}` }, h('span', { class: 'tc-l' }, c.label), h('span', { class: 'tc-v' }, ...td.childNodes)));
+      }
+      card.append(grid);
+      if (b.select) card.addEventListener('click', () => pick(r, card, cards));
+      if (selected !== null && r[b.select?.key] === selected) card.classList.add('sel');
+      return card;
+    }));
+  };
+  const draw = () => (phone.matches ? drawCards() : drawTable());
   cols.forEach((c, i) => headRow.append(h('th', { class: LEFT.has(c.fmt) || i === 0 ? 'l' : '', title: c.help || '',
     onclick: () => { sort = sort && sort.key === c.key ? { key: c.key, desc: !sort.desc } : { key: c.key, desc: !LEFT.has(c.fmt) }; draw(); } }, c.label)));
-  draw();
-  const wrap = h('div', { class: 'tbl-wrap', style: b.height ? { maxHeight: `${b.height}px` } : {} },
+  const table = h('div', { class: 'tbl-wrap', style: b.height ? { maxHeight: `${b.height}px` } : {} },
     h('table', { class: 'tbl' }, h('thead', {}, headRow), tbody));
+  const sortSel = h('select', { class: 'tc-sort', 'aria-label': 'Sort by', onchange: (e) => {
+    const [k, d] = e.target.value.split('|'); sort = k ? { key: k, desc: d === 'd' } : null; drawCards(); } },
+  h('option', { value: '' }, 'Sort: default'),
+  cols.flatMap((c) => [h('option', { value: `${c.key}|d` }, `${c.label} ↓`), h('option', { value: `${c.key}|a` }, `${c.label} ↑`)]));
+  const wrap = h('div', { class: 'tblock' }, h('div', { class: 'tc-bar' }, sortSel), cards, table);
+  const apply = () => { wrap.classList.toggle('as-cards', phone.matches); draw(); };
+  phone.addEventListener?.('change', apply); apply();
   return wrap;
 }
 function cellFor(c, r, i, wrap) {
@@ -310,6 +340,25 @@ export function NumberInput({ label, value, min, max, step = 1, help, cls, place
   const i = h('input', { type: 'number', inputmode: 'decimal', min, max, step, value, placeholder });
   const c = wire(field(label, i, help, cls), () => (i.value === '' ? null : Number(i.value)), (v) => { i.value = v; });
   i.addEventListener('change', c._emit); return c;
+}
+// Time span = a count plus a unit ("3" + "months"); quick chips fill both. get() -> { n, unit }.
+export const SPAN_UNITS = [['day', 'Days'], ['week', 'Weeks'], ['month', 'Months'], ['quarter', 'Quarters'], ['year', 'Years'], ['fy', 'Financial years']];
+const TRADING = { day: 1, week: 5, month: 21, quarter: 63, year: 252, fy: 252 };
+/** Approximate trading days in a span, for endpoints that take a horizon in trading days. */
+export const tradingDays = ({ n, unit }) => Math.max(1, Math.round(n * (TRADING[unit] || 1)));
+export function Span({ label = 'Time range', n = 6, unit = 'month', units = SPAN_UNITS, presets = [[1, 'month'], [3, 'month'], [6, 'month'], [1, 'year'], [3, 'year'], [5, 'year']], max = 600, help, cls }) {
+  const num = h('input', { type: 'number', inputmode: 'numeric', min: 1, max, step: 1, value: n, 'aria-label': `${label}: count` });
+  const sel = h('select', { 'aria-label': `${label}: unit` }, units.map(([v, l]) => h('option', { value: v }, l))); sel.value = unit;
+  const short = { day: 'D', week: 'W', month: 'M', quarter: 'Q', year: 'Y', fy: 'FY' };
+  const chips = h('div', { class: 'seg' }, presets.map(([pn, pu]) => h('button', { type: 'button', 'data-n': pn, 'data-u': pu,
+    onclick: () => { num.value = pn; sel.value = pu; paint(); c._emit(); } }, `${pn}${short[pu]}`)));
+  const read = () => { let v = Math.round(Number(num.value)); if (!Number.isFinite(v) || v < 1) v = 1; if (v > max) v = max; return { n: v, unit: sel.value }; };
+  const paint = () => { const cur = read(); [...chips.children].forEach((b) => b.classList.toggle('on', +b.dataset.n === cur.n && b.dataset.u === cur.unit)); };
+  const fire = () => { const cur = read(); num.value = cur.n; paint(); c._emit(); };
+  num.addEventListener('change', fire); sel.addEventListener('change', fire);
+  num.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); num.blur(); } });
+  const c = wire(field(label, h('div', {}, h('div', { class: 'span-row' }, num, sel), chips), help, cls), read, (v) => { num.value = v.n; sel.value = v.unit; paint(); });
+  paint(); return c;
 }
 export function TextInput({ label, value = '', placeholder, help, cls }) {
   const i = h('input', { type: 'text', value, placeholder, autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false' });

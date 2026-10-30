@@ -1,4 +1,4 @@
-import { h, pageHead, Segmented, Select, NumberInput, TextInput, Slider, Toggle, FileText, Results, card, formGrid, button, disclaimer,
+import { h, pageHead, Segmented, Select, Span, SPAN_UNITS, tradingDays, NumberInput, TextInput, Slider, Toggle, FileText, Results, card, formGrid, button, disclaimer,
   catalog, toast, icon, renderBlocks, md } from '../ui.js';
 import { get, post } from '../api.js';
 import { store } from '../store.js';
@@ -23,14 +23,15 @@ export async function render(view) {
 
   const target = Segmented({ label: 'Target gain', options: [['0.02', '2%'], ['0.05', '5%'], ['0.07', '7%'], ['0.1', '10%'], ['0.15', '15%'], ['custom', 'Custom']], value: last.target || '0.05' });
   const targetC = NumberInput({ label: 'Custom target (%)', value: last.targetC || 7, min: 0.5, max: 100, step: 0.5 });
-  const within = Segmented({ label: 'Within', options: [...Object.entries(cat.horizons).map(([l, d]) => [String(d), l]), ['custom', 'Custom']], value: last.within || '21' });
-  const withinC = NumberInput({ label: 'Trading days', value: last.withinC || 15, min: 2, max: 250, step: 1 });
+  const lw = last.within || {};
+  const within = Span({ label: 'Within', n: lw.n || 1, unit: lw.unit || 'month', units: SPAN_UNITS.slice(0, 5), max: 250,
+    presets: [[1, 'week'], [2, 'week'], [1, 'month'], [3, 'month'], [6, 'month'], [1, 'year']], help: 'Any count of days, weeks, months, quarters or years (converted to trading days).' });
   const stop = Segmented({ label: 'Stop-loss', options: [['auto', 'Auto'], ['fixed', 'Fixed %'], ['none', 'None']], value: last.stop || 'auto',
     help: 'Auto: volatility-based (at least 1×ATR), no wider than target ÷ 1.5. None: just the odds of touching the target.' });
   const stopF = NumberInput({ label: 'Stop (%)', value: last.stopF || 3, min: 0.5, max: 50, step: 0.5 });
   const universe = Select({ label: 'Search in', value: last.universe || 'nifty50', options: [['market', 'Entire NSE market (all listed stocks)'], ['nifty50', 'NIFTY 50'],
     ['holdings', 'My holdings'], ['watchlist', 'My watchlist'], ['custom', 'Custom list']] });
-  const custom = TextInput({ label: 'Symbols', value: last.custom || 'IRCTC, HAL, BEL, POLYCAB, DIXON, TATAELXSI, TRENT, ZYDUSLIFE', help: 'Comma separated, up to 70.' });
+  const custom = TextInput({ label: 'Symbols', value: last.custom || '', placeholder: 'e.g. IRCTC, HAL, TRENT', help: 'Comma separated NSE symbols, up to 70.' });
   const budget = NumberInput({ label: 'My budget (₹, 0 = no limit)', value: last.budget ?? 0, min: 0, step: 500, help: 'Only stocks you can afford at least one share of are considered, and JINNI builds a whole-share plan.' });
   const maxNames = Slider({ label: 'Split the budget across up to', min: 1, max: 5, value: last.maxNames || 3, fmt: (v) => `${v} stock${v > 1 ? 's' : ''}` });
   const deepN = Slider({ label: 'Market scan: deep-analyse the top', min: 20, max: 60, step: 10, value: last.deepN || 40, fmt: (v) => `${v} stocks`,
@@ -44,13 +45,13 @@ export async function render(view) {
   const filters = h('details', { class: 'acc' }, h('summary', {}, 'Market-scan filters'), h('div', { class: 'in' }, formGrid(minPx, minVal, sme, upload, upNote)));
 
   const sync = () => {
-    showIf(targetC, () => target.get() === 'custom'); showIf(withinC, () => within.get() === 'custom');
+    showIf(targetC, () => target.get() === 'custom'); 
     showIf(stopF, () => stop.get() === 'fixed'); showIf(custom, () => universe.get() === 'custom');
     showIf(deepN, () => universe.get() === 'market'); filters.classList.toggle('hidden', universe.get() !== 'market');
   };
-  [target, within, stop, universe].forEach((c) => c.onChange(sync)); sync();
+  [target, stop, universe].forEach((c) => c.onChange(sync)); sync();
   const runBtn = button('Find opportunities', () => run(), 'primary block', 'search');
-  view.append(card(formGrid(target, targetC, within, withinC, stop, stopF, universe, custom, budget, maxNames, deepN, ml), filters, h('div', { style: { marginTop: '12px' } }, runBtn)));
+  view.append(card(formGrid(target, targetC, within, stop, stopF, universe, custom, budget, maxNames, deepN, ml), filters, h('div', { style: { marginTop: '12px' } }, runBtn)));
 
   const res = new Results(); const out = h('div'); const detail = new Results();
   view.append(res.el, out, detail.el);
@@ -58,7 +59,7 @@ export async function render(view) {
 
   const params = () => {
     const t = target.get() === 'custom' ? (targetC.get() || 7) / 100 : +target.get();
-    const hz = within.get() === 'custom' ? Math.round(withinC.get() || 15) : +within.get();
+    const hz = Math.min(250, Math.max(2, tradingDays(within.get())));
     const st = stop.get() === 'fixed' ? String((stopF.get() || 3) / 100) : stop.get();
     return { t, hz, st };
   };
@@ -93,7 +94,7 @@ export async function render(view) {
   async function run() {
     detail.clear(); out.replaceChildren(); state = { funnel: null };
     const p = params(); let tickers;
-    store.saveLast('finder', { target: target.get(), targetC: targetC.get(), within: within.get(), withinC: withinC.get(), stop: stop.get(), stopF: stopF.get(),
+    store.saveLast('finder', { target: target.get(), targetC: targetC.get(), within: within.get(), stop: stop.get(), stopF: stopF.get(),
       universe: universe.get(), custom: custom.get(), budget: budget.get(), maxNames: maxNames.get(), deepN: deepN.get(), ml: ml.get(), minPx: minPx.get(), minVal: minVal.get() });
     runBtn.disabled = true;
     try {

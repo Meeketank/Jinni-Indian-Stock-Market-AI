@@ -19,7 +19,7 @@ from jinni import signals, ta
 from jinni.universe import BENCHMARK, NIFTY50, display_name, normalize_symbol
 
 from . import figs
-from .core import (ApiError, caption, callout, col, cols, doc, inr, kpis, memo, need_series, news_list, num, pct, plot,
+from .core import (ApiError, span_bars, span_label, caption, callout, col, cols, doc, inr, kpis, memo, need_series, news_list, num, pct, plot,
                    prices, rating_class, reply, section, source_notice, table, tabs, text, tone)
 
 router = APIRouter()
@@ -43,6 +43,13 @@ class Ctx:
 
 def ctx(t: str) -> Ctx:
     return memo(("ctx", normalize_symbol(t)), 120, lambda: Ctx(t))
+
+
+def window_scan(c: Ctx, bars: int):
+    """Patterns re-detected inside the visible window, so 3 months and 5 years show different patterns."""
+    full, _ = scan_of(c)
+    return memo(("wscan", c.t, str(c.df.index[-1]), bars), CTX_TTL,
+                lambda: jpat.scan_window(c.df, bars, full["candle_frame"]))
 
 
 def scan_of(c: Ctx):
@@ -165,15 +172,18 @@ def overview(t: str):
 @router.get("/stock/{t}/chart")
 def chart(t: str, overlays: str = "EMA 20,SMA 50,SMA 200", panels: str = "RSI 14,MACD",
           layers: str = "Candlestick patterns,Chart patterns,Trendlines,Support/resistance zones",
-          zoom: str = "6M", heikin: int = 0):
+          n: int = Query(6, ge=1, le=600), unit: str = "month", heikin: int = 0):
     c = ctx(t)
     ov = [x for x in (s.strip() for s in overlays.split(",")) if x in ta.CATALOG and ta.CATALOG[x].kind == "overlay"][:14]
     pn = [x for x in (s.strip() for s in panels.split(",")) if x in ta.CATALOG and ta.CATALOG[x].kind == "panel"][:4]
     ly = [x for x in (s.strip() for s in layers.split(",")) if x in figs.LAYERS]
-    view = {"3M": 63, "6M": 126, "1Y": 252, "2Y": 504, "5Y": 1260}.get(zoom, 126)
-    scan, _ = scan_of(c)
-    f = figs.price_chart(c.df, ov, pn, ly, scan, bool(heikin), min(view, len(c.df)))
+    bars = span_bars(c.df, n, unit, minimum=5)
+    scan = window_scan(c, bars)
+    f = figs.price_chart(c.df, ov, pn, ly, scan, bool(heikin), bars)
     blocks = source_notice(c.source)
+    blocks.append(text(f"**{span_label(n, unit).capitalize()}** · {bars} trading days · "
+                       f"{c.df.index[-bars].strftime('%d %b %Y')} to {c.df.index[-1].strftime('%d %b %Y')}. "
+                       "Patterns are detected inside this window, so changing the range changes what is found."))
     blocks.append(plot(f, 520 + 150 * len(pn)))
     blocks.append(caption("▲/▼ markers = bullish/bearish candlestick patterns; shaded bands = support (green) / "
                           "resistance (red) zones; ✓ = breakout confirmed by a close. Tap a marker for its name."))
@@ -194,24 +204,32 @@ def chart(t: str, overlays: str = "EMA 20,SMA 50,SMA 200", panels: str = "RSI 14
 
 
 @router.get("/stock/{t}/patterns")
-def patterns(t: str, h: int = Query(10, ge=5, le=20)):
+def patterns(t: str, h: int = Query(10, ge=5, le=20), n: int = Query(6, ge=1, le=600), unit: str = "month"):
     c = ctx(t)
-    scan, _ = scan_of(c)
+    bars = span_bars(c.df, n, unit, minimum=5)
+    scan = window_scan(c, bars)
     blocks = source_notice(c.source)
     all_p = scan["chart"] + scan["harmonic"] + scan["wave"] + scan["divergence"] + scan["trend"] + scan["gap"]
+    cndl = [p for p in scan["candles"]]
+    blocks.append(text(f"**{len(all_p)} chart patterns and {len(cndl)} recent candle patterns** in the last "
+                       f"{span_label(n, unit)} ({bars} trading days). Everything listed below is drawn on this chart."))
+    f = figs.price_chart(c.df, ["EMA 20", "SMA 50"], [], [x for x in figs.LAYERS if x != "Fibonacci"], scan, False, bars)
+    blocks.append(plot(f, 560))
+    blocks.append(caption("Green = bullish, red = bearish, blue = trendlines, dotted lines = pattern targets. "
+                          "Change the range above to look for shorter or longer patterns."))
     rows = [{"Pattern": p.name, "Type": p.kind.title(), "Bias": p.bias_text, "Status": p.status,
              "Since": p.start, "Target": p.target, "Invalidation": p.invalidation, "Note": p.note} for p in all_p]
     rows += [{"Pattern": p.name, "Type": "Candle", "Bias": p.bias_text, "Status": "printed", "Since": p.end,
-              "Target": None, "Invalidation": None, "Note": ""} for p in scan["candles"]]
+              "Target": None, "Invalidation": None, "Note": ""} for p in cndl]
     if rows:
         blocks.append(table(pd.DataFrame(rows), [col("Pattern", "Pattern"), col("Type", "Type"), col("Bias", "Bias", "badge"),
                                                  col("Status", "Status"), col("Since", "Since", "date"),
                                                  col("Target", "Target ₹", "inr2"), col("Invalidation", "Invalid. ₹", "inr2"),
                                                  col("Note", "What it means")]))
     else:
-        blocks.append(callout("info", "No patterns detected right now."))
+        blocks.append(callout("info", "No chart patterns in this window. Try a longer range."))
     blocks.append(section("Did these patterns work on this stock before?"))
-    cs = jpat.candle_stats(c.df, scan["candle_frame"], h)
+    cs = jpat.candle_stats(c.df, scan_of(c)[0]["candle_frame"], h)
     cs = cs[cs["Times"] > 0].sort_values("Times", ascending=False).reset_index()
     blocks.append(text(f"**Candlestick patterns**: average {h}-day move after each, on {display_name(c.t)}'s own history "
                        f"(normal {h}-day average: {cs.attrs.get('base_mean', 0):+.2%})."))
@@ -245,7 +263,7 @@ def indicators(t: str):
                        figs.UP if sc > .1 else figs.DOWN if sc < -.1 else figs.GOLD,
                        [dict(range=[-100, -50], color="rgba(239,68,68,.25)"), dict(range=[50, 100], color="rgba(34,197,94,.25)")],
                        [-100, -50, 0, 50, 100])
-        gs.append([plot(g, 220)])
+        gs.append([plot(g, 270)])
     blocks.append(cols(*gs))
     blocks.append(kpis([(cat, v[cat]["label"], f"{v[cat]['buy']} buy · {v[cat]['neutral']} neutral · {v[cat]['sell']} sell")
                         for cat in ta.CATEGORIES]))

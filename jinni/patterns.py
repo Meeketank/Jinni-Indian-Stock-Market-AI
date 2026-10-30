@@ -176,13 +176,13 @@ class Pivot:
     confirmed: int  # bar index when the reversal confirmed it
 
 
-def zigzag(df: pd.DataFrame, pct: float | None = None) -> list[Pivot]:
+def zigzag(df: pd.DataFrame, pct: float | None = None, mult: float = 2.0, floor: float = 0.03) -> list[Pivot]:
     """Swing pivots: a high/low becomes a pivot once price reverses by ``pct``
     (default: max(3%, 2×median ATR%)). Each pivot records when it was confirmed."""
     h, lo, c = df["High"].values, df["Low"].values, df["Close"].values
     if pct is None:
         a = (ind.atr(df) / df["Close"]).median()
-        pct = float(np.clip(2 * a if np.isfinite(a) else 0.04, 0.03, 0.15))
+        pct = float(np.clip(mult * a if np.isfinite(a) else 0.04, floor, 0.15))
     piv: list[Pivot] = []
     n = len(c)
     if n < 3:
@@ -722,9 +722,12 @@ def sr_zones(df: pd.DataFrame, pivs: list[Pivot], width: float = 0.015, min_touc
 # =============================================================== all-in-one
 
 
-def scan(df: pd.DataFrame, candle_window: int = 10) -> dict:
-    pivs = zigzag(df)
-    cf = candlestick_frame(df)
+def scan(df: pd.DataFrame, candle_window: int = 10, mult: float = 2.0, floor: float = 0.03,
+         candle_frame: pd.DataFrame | None = None) -> dict:
+    """Detect everything on ``df``. ``mult``/``floor`` set how big a swing counts as a pivot (smaller = finer
+    patterns, used for short windows); ``candle_frame`` lets a caller reuse candles computed on longer history."""
+    pivs = zigzag(df, mult=mult, floor=floor)
+    cf = candle_frame if candle_frame is not None else candlestick_frame(df)
     recent = cf.iloc[-candle_window:]
     candles = []
     for d, row in recent.iterrows():
@@ -769,3 +772,16 @@ def pattern_history(df: pd.DataFrame, horizon: int = 20, step: int = 3) -> pd.Da
     x = pd.DataFrame(rows)
     return x.groupby("Pattern").agg(Times=("ret", "size"), **{f"Avg {horizon}d": ("ret", "mean")},
                                      **{"Worked %": ("worked", "mean")})
+
+
+def scan_window(df: pd.DataFrame, bars: int, full_candles: pd.DataFrame | None = None) -> dict:
+    """Detect patterns as they look in the last ``bars`` bars: a 3-month view gets short, fine patterns and a
+    5-year view gets the big ones. Candles are computed on the full history (they need trend context)."""
+    bars = int(max(20, min(bars, len(df))))
+    w = df.iloc[-bars:]
+    mult, floor = ((1.2, 0.015) if bars <= 70 else (1.5, 0.02) if bars <= 140 else (1.8, 0.025) if bars <= 300
+                   else (2.0, 0.03))
+    cf = (full_candles if full_candles is not None else candlestick_frame(df)).reindex(w.index).fillna(False)
+    out = scan(w, mult=mult, floor=floor, candle_frame=cf.astype(bool))
+    out["bars"] = bars
+    return out

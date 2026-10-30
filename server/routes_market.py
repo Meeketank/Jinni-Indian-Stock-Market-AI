@@ -64,7 +64,9 @@ def search(q: str = Query("", max_length=40)):
     q = q.strip().upper()
     if not q:
         return reply({"results": []}, ttl=3600)
-    uni = memo(("bundled-universe",), 3600, market.bundled_universe)
+    # Live NSE list (every listed stock) -> today's cache -> bundled snapshot; never fails.
+    uni = memo(("search-universe", jdata.demo_forced()), 6 * 3600,
+               lambda: market.bundled_universe() if jdata.demo_forced() else market.nse_universe())
     names = dict(zip(uni["symbol"], uni["name"]))
     hits = []
     for sym, name in names.items():
@@ -80,28 +82,29 @@ def search(q: str = Query("", max_length=40)):
 # ------------------------------------------------------------------- home
 
 
-@router.get("/home")
-def home():
-    idx_t, sec_t, mac_t = list(INDICES), list(SECTOR_INDICES), list(MACRO)
-    stk_t = list(NIFTY50)
+def _board_table(df: pd.DataFrame):
+    df = df.assign(Cap=df["Mkt cap"] / 1e7)
+    cc = [col("Stock", "Stock"), col("Price", "Price ₹", "inr2"), col("1D", "Today", "spct2"),
+          col("Volume", "Volume", "int"), col("Cap", "Mkt cap ₹ cr", "n0"), col("52w high", "52w high ₹", "inr2"),
+          col("P/E", "P/E", "n1")]
+    return table(df, cc, select={"key": "t", "action": "analyze"})
 
-    def build():
-        pdx = prices(idx_t + mac_t + sec_t + stk_t, "1y", ttl=300)
-        return pdx
 
-    pdx = memo(("home",), 120, build)
+@router.get("/home/pulse")
+def home_pulse():
+    """Indices, macro, VIX and the NIFTY chart: ~10 symbols, so it is quick and loads first."""
+    idx_t, mac_t = list(INDICES), list(MACRO)
+    pdx = memo(("home-pulse",), 90, lambda: prices(idx_t + mac_t, "1y", ttl=90))
     c = pdx.close
     blocks = source_notice(pdx.source)
-
     tp = []
-    for t in idx_t + mac_t + stk_t[:20]:
+    for t in idx_t + mac_t:
         if t in c:
             s = c[t].dropna()
             if len(s) > 1:
                 tp.append((display_name(t), float(s.iloc[-1]), float(s.iloc[-1] / s.iloc[-2] - 1)))
     if tp:
         blocks.append(tape(tp))
-
     items = []
     nifty = c[BENCHMARK].dropna() if BENCHMARK in c else None
     if nifty is not None and len(nifty) > 200:
@@ -119,16 +122,8 @@ def home():
             mood = "Calm" if lvl < 13 else "Normal" if lvl < 18 else "Elevated" if lvl < 24 else "Fear"
             items.append(("India VIX", f"{lvl:.2f}", f"{mood} · {pct(lvl / vix.iloc[-2] - 1, 2, True)}",
                           "down" if lvl >= 18 else "up"))
-    sc = c[[t for t in stk_t if t in c]]
-    if len(sc) > 50:
-        above50 = (sc.iloc[-1] > sc.rolling(50).mean().iloc[-1]).mean()
-        above200 = (sc.iloc[-1] > sc.rolling(200, min_periods=150).mean().iloc[-1]).mean()
-        adv, dec = int((sc.iloc[-1] > sc.iloc[-2]).sum()), int((sc.iloc[-1] < sc.iloc[-2]).sum())
-        items.append(("Breadth (>50-DMA)", pct(above50, 0), f">200-DMA {pct(above200, 0)}", "up" if above50 >= .5 else "down"))
-        items.append(("Advance / Decline", f"{adv} / {dec}", "NIFTY 50 today", "up" if adv >= dec else "down"))
-    blocks.append(kpis(items))
-
-    left, right = [], []
+    if items:
+        blocks.append(kpis(items))
     if nifty is not None:
         lo, hi = float(nifty.min()), float(nifty.max())
         f = figs.lines(nifty.index, {
@@ -136,7 +131,17 @@ def home():
             "50-DMA": dict(y=ind.sma(nifty, 50), color=figs.BLUE, width=1.2),
             "200-DMA": dict(y=ind.sma(nifty, 200), color=figs.MUTED, width=1.2, dash="dot")},
             title="NIFTY 50 · 1 year", yrange=(lo * .97, hi * 1.02))
-        left.append(plot(f, 340))
+        blocks.append(plot(f, 320))
+    blocks.append(caption(f"As of {c.index[-1]:%d %b %Y}. Daily bars from Yahoo Finance (may lag the exchange)."))
+    return reply(doc(blocks, pdx.source), ttl=60)
+
+
+@router.get("/home/sectors")
+def home_sectors():
+    sec_t = list(SECTOR_INDICES)
+    pdx = memo(("home-sectors",), 300, lambda: prices(sec_t, "1y", ttl=300))
+    c = pdx.close
+    blocks = source_notice(pdx.source)
     rows = []
     for t, nm in SECTOR_INDICES.items():
         if t in c:
@@ -151,20 +156,61 @@ def home():
         f = figs.heatmap(z, sdf.columns, sdf.index, "Sector rotation", -lim, lim,
                          [[0, figs.DOWN], [0.5, "var(--panel2)"], [1, figs.UP]],
                          [[f"{v:+.1f}%" for v in r] for r in z], fmt=".1f")
-        right.append(plot(f, 340))
-    blocks.append(cols(left, right, ratio=[3, 2]))
-
-    if len(sc) > 22:
-        chg = pd.DataFrame({"Stock": [display_name(t) for t in sc.columns], "Price": sc.iloc[-1].values,
-                            "1D": (sc.iloc[-1] / sc.iloc[-2] - 1).values, "1M": (sc.iloc[-1] / sc.iloc[-22] - 1).values,
-                            "From 52w high": (sc.iloc[-1] / sc.max() - 1).values, "t": list(sc.columns)}).dropna(subset=["1D"])
-        cc = [col("Stock", "Stock"), col("Price", "Price", "inr2"), col("1D", "1D", "spct2"), col("1M", "1M", "spct1"),
-              col("From 52w high", "vs 52w high", "pct1")]
-        sel = {"key": "t", "action": "analyze"}
-        blocks.append(section("NIFTY 50 movers"))
-        blocks.append(cols([text("**Top gainers**"), table(chg.nlargest(5, "1D"), cc, select=sel)],
-                           [text("**Top losers**"), table(chg.nsmallest(5, "1D"), cc, select=sel)]))
+        blocks.append(plot(f, 360))
+    else:
+        blocks.append(callout("warn", "Sector index data is not available right now."))
     return reply(doc(blocks, pdx.source), ttl=180)
+
+
+@router.get("/home/movers")
+def home_movers():
+    """Live NSE-wide gainers, losers and most-active stocks (market cap above ₹500 cr, price above ₹20)."""
+    from jinni import live
+
+    def build():
+        return {k: live.board(k, 15) for k in live.BOARDS}
+
+    boards = memo(("home-movers", jdata.demo_forced()), 60, build)
+    blocks = []
+    if jdata.demo_forced():
+        blocks.append({"type": "demo"})
+        blocks.append(callout("info", "Live market-wide movers are not shown in demo mode."))
+        return reply(doc(blocks, "demo"), ttl=60)
+    got = {k: v for k, v in boards.items() if v is not None}
+    if not got:
+        blocks.append(callout("warn", "The live market-wide movers feed is not reachable right now. The NIFTY 50 table "
+                                      "below still updates from daily prices."))
+        return reply(doc(blocks, "live"))
+    names = {"gainers": "Top gainers", "losers": "Top losers", "active": "Most active"}
+    blocks.append(tabs([(names[k], [_board_table(v)]) for k, v in got.items()]))
+    blocks.append(caption("Every NSE-listed stock above ₹500 cr market cap and ₹20, ranked live by today's % change or volume. "
+                          "Tap a row to analyse it."))
+    return reply(doc(blocks, "live"), ttl=60)
+
+
+@router.get("/home/nifty50")
+def home_nifty50():
+    stk_t = list(NIFTY50)
+    pdx = memo(("home-n50",), 120, lambda: prices(stk_t, "1y", ttl=120))
+    c = pdx.close
+    blocks = source_notice(pdx.source, pdx.missing)
+    sc = c[[t for t in stk_t if t in c]]
+    if len(sc) <= 50:
+        blocks.append(callout("warn", "NIFTY 50 prices are not available right now."))
+        return reply(doc(blocks, pdx.source))
+    above50 = (sc.iloc[-1] > sc.rolling(50).mean().iloc[-1]).mean()
+    above200 = (sc.iloc[-1] > sc.rolling(200, min_periods=150).mean().iloc[-1]).mean()
+    adv, dec = int((sc.iloc[-1] > sc.iloc[-2]).sum()), int((sc.iloc[-1] < sc.iloc[-2]).sum())
+    blocks.append(kpis([("Breadth (>50-DMA)", pct(above50, 0), f">200-DMA {pct(above200, 0)}", "up" if above50 >= .5 else "down"),
+                        ("Advance / Decline", f"{adv} / {dec}", "NIFTY 50 today", "up" if adv >= dec else "down")]))
+    chg = pd.DataFrame({"Stock": [display_name(t) for t in sc.columns], "Price": sc.iloc[-1].values,
+                        "1D": (sc.iloc[-1] / sc.iloc[-2] - 1).values, "1W": (sc.iloc[-1] / sc.iloc[-6] - 1).values,
+                        "1M": (sc.iloc[-1] / sc.iloc[-22] - 1).values,
+                        "From 52w high": (sc.iloc[-1] / sc.max() - 1).values, "t": list(sc.columns)}).dropna(subset=["1D"])
+    cc = [col("Stock", "Stock"), col("Price", "Price ₹", "inr2"), col("1D", "1D", "spct2"), col("1W", "1W", "spct1"),
+          col("1M", "1M", "spct1"), col("From 52w high", "vs 52w high", "pct1")]
+    blocks.append(table(chg, cc, select={"key": "t", "action": "analyze"}, sort=("1D", True), height=520))
+    return reply(doc(blocks, pdx.source), ttl=120)
 
 
 # ------------------------------------------------------------------- mood

@@ -1,4 +1,4 @@
-import { h, icon, pageHead, SymbolInput, Segmented, Select, NumberInput, Slider, Toggle, Chips, MultiPick, tabsUI, disclaimer,
+import { h, icon, pageHead, SymbolInput, Segmented, Select, Span, SPAN_UNITS, tradingDays, NumberInput, Slider, Toggle, Chips, MultiPick, tabsUI, disclaimer,
   catalog, niftySuggest, button, toast, card } from '../ui.js';
 import { get } from '../api.js';
 import { store } from '../store.js';
@@ -31,18 +31,19 @@ export async function render(view, params) {
       const ov = MultiPick({ label: 'Overlays', groups: group('overlay'), value: ['EMA 20', 'SMA 50', 'SMA 200'], max: 14, noun: 'overlays' });
       const pn = MultiPick({ label: 'Indicator panels', groups: group('panel'), value: ['RSI 14', 'MACD'], max: 4, noun: 'indicators' });
       const ly = Chips({ label: 'Auto-detected patterns to draw', options: cat.layers, value: LAYER_DEFAULT, cls: 'full' });
-      const zm = Segmented({ label: 'Zoom', options: ['3M', '6M', '1Y', '2Y', '5Y'], value: '6M' });
+      const zm = Span({ label: 'Time range', n: 6, unit: 'month' });
       const hk = Toggle({ label: 'Heikin-Ashi candles', value: false });
-      livePanel(p, [ov, pn, ly, zm, hk], () => api('chart', { overlays: ov.get().join(','), panels: pn.get().join(','),
-        layers: ly.get().join(','), zoom: zm.get(), heikin: hk.get() ? 1 : 0 }));
+      livePanel(p, [zm, ov, pn, ly, hk], () => api('chart', { overlays: ov.get().join(','), panels: pn.get().join(','),
+        layers: ly.get().join(','), ...zm.get(), heikin: hk.get() ? 1 : 0 }));
     } },
-    { label: 'Patterns', load: (p) => { const hz = Segmented({ label: 'Look-ahead (trading days)', options: [5, 10, 20], value: 10 });
-      livePanel(p, [hz], () => api('patterns', { h: hz.get() })); } },
+    { label: 'Patterns', load: (p) => { const zm = Span({ label: 'Look for patterns in the last', n: 6, unit: 'month' });
+      const hz = Segmented({ label: 'Look-ahead for history stats (trading days)', options: [5, 10, 20], value: 10 });
+      livePanel(p, [zm, hz], () => api('patterns', { h: hz.get(), ...zm.get() })); } },
     { label: 'Indicators', load: (p) => livePanel(p, [], () => api('indicators')) },
     { label: 'Return odds', load: (p) => {
       const g = Segmented({ label: 'Goal', options: [[0.02, '+2%'], [0.03, '+3%'], [0.05, '+5%'], [0.07, '+7%'], [0.1, '+10%'], [0.15, '+15%'], [0.2, '+20%']], value: 0.05 });
-      const w = Select({ label: 'Within', options: Object.entries(cat.horizons).map(([l, d]) => [d, l]), value: 21 });
-      const wrap = livePanel(p, [g, w], () => api('odds', { target: g.get(), hz: w.get() }));
+      const w = Span({ label: 'Within', n: 1, unit: 'month', units: SPAN_UNITS.slice(0, 5), presets: [[1, 'week'], [2, 'week'], [1, 'month'], [3, 'month'], [6, 'month'], [1, 'year']], max: 250 });
+      const wrap = livePanel(p, [g, w], () => api('odds', { target: g.get(), hz: Math.min(250, tradingDays(w.get())) }));
       p.append(h('a', { href: '#/finder', class: 'btn small' }, icon('target'), 'Compare against every stock in Return Finder'));
     } },
     { label: 'Seasonality', load: (p) => livePanel(p, [], () => api('seasonality')) },

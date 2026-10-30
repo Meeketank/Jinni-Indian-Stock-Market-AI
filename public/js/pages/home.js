@@ -20,12 +20,30 @@ export async function render(view) {
     h('p', {}, 'Multi-factor ratings, odds of reaching your target, portfolio VaR and stress tests, auto-detected chart patterns and event studies for NSE & BSE, in one place.'),
     h('div', { class: 'cta' }, button('Find stocks for my target', () => go('#/finder'), 'primary', 'target'),
       button('Analyze a stock', () => go('#/stock'), '', 'chart'))));
-  const res = new Results(); view.append(res.el);
-  const load = async () => {
-    res.loading('Loading market pulse…', 'Reading indices, sectors and the NIFTY 50');
-    try { const d = await get('/home'); res.show(d.blocks, ctxNav); } catch (e) { res.error(e, load); }
+  // Each section loads on its own, so one slow or failing feed never blanks the page.
+  const section = (title, path, loadingMsg, ttl) => {
+    const res = new Results(); const head = h('div', { class: 'section-title' }, title);
+    const load = async (fresh) => {
+      const had = res.el.children.length > 0 && !res.el.querySelector('.callout.error');
+      if (!had) res.loading(loadingMsg);
+      try { const d = await get(path, {}, fresh ? { fresh: true } : {}); res.show(d.blocks, ctxNav); }
+      catch (e) { if (!had) res.error(e, () => load(true)); }
+    };
+    view.append(head, res.el); load();
+    if (ttl) { const t = setInterval(() => { if (!res.el.isConnected) clearInterval(t); else if (!document.hidden) load(true); }, ttl); }
   };
-  load();
+  view.append(h('div', { class: 'section-title' }, 'Market pulse'));
+  const pulse = new Results(); view.append(pulse.el);
+  const loadPulse = async (fresh) => {
+    const had = pulse.el.children.length > 0 && !pulse.el.querySelector('.callout.error');
+    if (!had) pulse.loading('Loading indices…');
+    try { const d = await get('/home/pulse', {}, fresh ? { fresh: true } : {}); pulse.show(d.blocks, ctxNav); } catch (e) { if (!had) pulse.error(e, () => loadPulse(true)); }
+  };
+  loadPulse();
+  const timer = setInterval(() => { if (!pulse.el.isConnected) clearInterval(timer); else if (!document.hidden) loadPulse(true); }, 60000);
+  section('Today’s movers · all NSE stocks', '/home/movers', 'Reading live quotes for the whole exchange…', 60000);
+  section('Sector rotation', '/home/sectors', 'Reading sector indices…');
+  section('NIFTY 50 stocks', '/home/nifty50', 'Reading all 50 constituents…');
   view.append(h('div', { class: 'section-title' }, 'Workspaces'),
     h('div', { class: 'grid-cards' }, CARDS.map(([id, ic, t, d]) => h('a', { class: 'nav-card', href: `#/${id}` },
       h('div', { class: 't' }, icon(ic), t), h('div', { class: 'd' }, d)))), disclaimer());

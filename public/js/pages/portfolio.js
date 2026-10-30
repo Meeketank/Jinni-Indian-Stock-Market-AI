@@ -6,6 +6,7 @@ import { ctxNav, holdingsForApi } from './kit.js';
 export async function render(view) {
   view.append(pageHead('Portfolio Risk', 'VaR and CVaR four ways, stress tests, risk contribution, beta and liquidity for your holdings.'));
   let rows = store.holdings().map((x) => ({ ...x }));
+  if (!rows.length) rows = [{ ticker: '', quantity: '', avg_cost: '' }];
   const list = h('div'); const note = h('div', { class: 'caption' });
   const paint = () => {
     list.replaceChildren(...rows.map((r, i) => h('div', { class: 'edit-row' },
@@ -13,7 +14,7 @@ export async function render(view) {
       h('input', { type: 'number', value: r.quantity, min: 0, placeholder: 'Qty', inputmode: 'decimal', 'aria-label': 'Quantity', oninput: (e) => { r.quantity = e.target.value; } }),
       h('input', { type: 'number', value: r.avg_cost ?? '', min: 0, placeholder: 'Avg cost ₹', inputmode: 'decimal', 'aria-label': 'Average cost', oninput: (e) => { r.avg_cost = e.target.value; } }),
       h('button', { type: 'button', class: 'btn small danger del', 'aria-label': 'Remove row', onclick: () => { rows.splice(i, 1); paint(); } }, icon('trash')))));
-    note.textContent = store.hasOwnHoldings() ? '' : 'Sample portfolio shown until you save your own.';
+    note.textContent = store.hasOwnHoldings() ? '' : 'Enter your own holdings (or import a CSV). Nothing is pre-filled.';
   };
   paint();
   const clean = () => rows.filter((r) => r.ticker && +r.quantity > 0).map((r) => ({ ticker: r.ticker, quantity: +r.quantity, avg_cost: r.avg_cost ? +r.avg_cost : null }));
@@ -43,8 +44,8 @@ export async function render(view) {
   view.append(card(h('div', { class: 'section-title', style: { marginTop: 0 } }, 'Holdings'), list, note,
     h('div', { class: 'row', style: { marginTop: '8px' } }, button('Add row', () => { rows.push({ ticker: '', quantity: '', avg_cost: '' }); paint(); }, 'small', 'plus'),
       imp, button('Export CSV', () => download('jinni_holdings.csv', csvText(), 'text/csv'), 'small', 'download'),
-      button('Reset to sample', () => { store.resetHoldings(); rows = store.holdings().map((x) => ({ ...x })); paint(); toast('Sample portfolio restored'); }, 'small'))),
+      button('Clear all', () => { store.resetHoldings(); rows = [{ ticker: '', quantity: '', avg_cost: '' }]; paint(); toast('Holdings cleared'); }, 'small'))),
     card(formGrid(lookback, conf, horizon, shock, part), h('div', { class: 'row', style: { marginTop: '12px' } }, button('Save & analyze', () => { if (save()) run(); }, 'primary', 'shield'))),
     res.el, disclaimer());
-  run();
+  if (store.hasOwnHoldings() && clean().length) run();
 }

@@ -143,6 +143,38 @@ def need_series(pdx: jdata.PriceData, ticker: str, min_len: int = 60) -> pd.Data
     return pdx.ohlcv(ticker)
 
 
+# -------------------------------------------------------------- time spans
+
+UNITS = {"day": "days", "week": "weeks", "month": "months", "quarter": "quarters", "year": "years", "fy": "financial years"}
+_MONTHS = {"day": 0, "week": 0, "month": 1, "quarter": 3, "year": 12}
+
+
+def span_start(last: pd.Timestamp, n: int, unit: str) -> pd.Timestamp:
+    """First calendar date of a window of ``n`` ``unit`` ending at ``last``. 'fy' = Indian financial years
+    (1 April to 31 March), counting the current one: n=1 is the financial year to date."""
+    if unit not in UNITS:
+        raise ApiError(422, f"Unknown unit '{unit}'. Use one of: {', '.join(UNITS)}.")
+    n = int(max(1, min(n, 600)))
+    if unit == "day":
+        return last - pd.Timedelta(days=n)
+    if unit == "week":
+        return last - pd.Timedelta(weeks=n)
+    if unit == "fy":
+        fy_start = pd.Timestamp(year=last.year if last.month >= 4 else last.year - 1, month=4, day=1)
+        return fy_start - pd.DateOffset(years=n - 1)
+    return last - pd.DateOffset(months=_MONTHS[unit] * n)
+
+
+def span_bars(df: pd.DataFrame, n: int, unit: str, minimum: int = 20) -> int:
+    """Number of trading bars of ``df`` inside the span (at least ``minimum``, at most all of it)."""
+    start = span_start(df.index[-1], n, unit)
+    return int(min(len(df), max(minimum, (df.index >= start).sum())))
+
+
+def span_label(n: int, unit: str) -> str:
+    return f"{n} {UNITS[unit][:-1] if n == 1 else UNITS[unit]}"
+
+
 # ------------------------------------------------------------------ blocks
 
 
