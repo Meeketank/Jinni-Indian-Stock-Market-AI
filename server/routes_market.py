@@ -59,24 +59,63 @@ def catalog():
     }, ttl=3600)
 
 
+def _local_hits(q: str, limit: int = 12) -> list[dict]:
+    """Match against every NSE-listed name (live list -> today's cache -> bundled snapshot)."""
+    uni = memo(("search-universe", jdata.demo_forced()), 3600,
+               lambda: market.bundled_universe() if jdata.demo_forced() else market.nse_universe())
+    words = [w for w in q.replace("&", " & ").split() if w]
+    hits = []
+    for sym, name in zip(uni["symbol"], uni["name"]):
+        s, nm = sym.upper(), str(name).upper()
+        if s == q.replace(" ", ""):
+            score = 0
+        elif s.startswith(q.replace(" ", "")):
+            score = 1
+        elif all(w in nm or w in s for w in words):
+            score = 2 if nm.startswith(words[0]) else 3
+        else:
+            continue
+        hits.append((score, len(s), sym, str(name)))
+    hits.sort()
+    return [{"t": f"{s}.NS", "name": n.title(), "symbol": s, "src": "NSE"} for _, _, s, n in hits[:limit]]
+
+
+def _yahoo_hits(q: str, limit: int = 10) -> list[dict]:
+    """Yahoo's own search: covers every NSE and BSE listing, including ones newer than our list."""
+    if jdata.demo_forced():
+        return []
+    try:
+        res = jdata._yf().Search(q, max_results=limit * 2, news_count=0, lists_count=0, recommended=0, timeout=6,
+                                 raise_errors=False).quotes
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    for r in res or []:
+        sym = str(r.get("symbol", ""))
+        if r.get("quoteType") not in (None, "EQUITY", "ETF") or not sym.endswith((".NS", ".BO")):
+            continue
+        out.append({"t": sym, "name": (r.get("longname") or r.get("shortname") or sym).title(),
+                    "symbol": sym.rsplit(".", 1)[0], "src": "NSE" if sym.endswith(".NS") else "BSE"})
+    return out[:limit]
+
+
 @router.get("/search")
 def search(q: str = Query("", max_length=40)):
-    q = q.strip().upper()
+    q = " ".join(q.strip().upper().split())
     if not q:
         return reply({"results": []}, ttl=3600)
-    # Live NSE list (every listed stock) -> today's cache -> bundled snapshot; never fails.
-    uni = memo(("search-universe", jdata.demo_forced()), 6 * 3600,
-               lambda: market.bundled_universe() if jdata.demo_forced() else market.nse_universe())
-    names = dict(zip(uni["symbol"], uni["name"]))
-    hits = []
-    for sym, name in names.items():
-        s = sym.upper()
-        score = 0 if s == q else 1 if s.startswith(q) else 2 if q in s else 3 if q in name.upper() else None
-        if score is not None:
-            hits.append((score, len(s), sym, name))
-    hits.sort()
-    res = [{"t": f"{s}.NS", "name": n.title(), "symbol": s} for _, _, s, n in hits[:12]]
-    return reply({"results": res}, ttl=3600)
+
+    def build():
+        merged, seen = [], set()
+        for r in _local_hits(q) + _yahoo_hits(q):
+            key = r["symbol"]  # same company on NSE and BSE: keep the NSE line
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(r)
+        return merged[:15]
+
+    return reply({"results": memo(("search", q), 3600, build)}, ttl=600)
 
 
 # ------------------------------------------------------------------- home

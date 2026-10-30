@@ -422,28 +422,48 @@ export function MultiPick({ label, groups, value = [], max = 99, help, cls, noun
   const c = wire(field(label, summary, help, cls), () => [...sel], (v) => { sel = [...v]; paint(); }); paint(); return c;
 }
 // Symbol box with NIFTY 50 suggestions and server-side search of all listed stocks.
+/** Turn whatever was typed ("vedanta", "TCS", "hdfc bank") into a listed ticker, or null if nothing matches. */
+export async function resolveSymbol(text) {
+  const q = String(text || '').trim(); if (!q) return null;
+  if (q.startsWith('^') || q.includes('=')) return q.toUpperCase();
+  const r = await get('/search', { q });
+  const res = r.results || []; const bare = q.toUpperCase().replace(/\s+/g, '').replace(/\.(NS|BO)$/, '');
+  const exact = res.find((x) => x.symbol.toUpperCase() === bare && (!/\.(NS|BO)$/i.test(q) || x.t.toUpperCase() === q.toUpperCase().replace(/\s+/g, '')));
+  return (exact || res[0])?.t || null;
+}
 export function SymbolInput({ label, value = '', help, cls, suggestions = [] }) {
-  const i = h('input', { type: 'text', value, placeholder: 'Type a name or symbol, e.g. Tata or IRCTC', autocomplete: 'off', autocapitalize: 'characters', spellcheck: 'false' });
-  const list = h('div', { class: 'list hidden' }); let timer; let seq = 0;
-  const hide = () => list.classList.add('hidden');
-  const pick = (t) => { i.value = t; hide(); c._emit(); };
-  const show = (items) => {
-    if (!items.length) return hide();
-    list.replaceChildren(...items.slice(0, 10).map((x) => h('div', { class: 'opt', onmousedown: (e) => { e.preventDefault(); pick(x.t); } }, h('span', {}, x.t), h('small', {}, x.name))));
+  const i = h('input', { type: 'text', value, placeholder: 'Search any listed stock, e.g. Vedanta or IRCTC', autocomplete: 'off', autocapitalize: 'none', autocorrect: 'off', spellcheck: 'false', enterkeyhint: 'search' });
+  const list = h('div', { class: 'list hidden' }); let timer; let seq = 0; let items = []; let cur = -1;
+  const hide = () => { list.classList.add('hidden'); cur = -1; };
+  const paint = () => [...list.children].forEach((e, k) => e.classList?.toggle('act', k === cur));
+  const finish = (t) => { i.value = t; hide(); c._emit(); };
+  const show = (rows, note) => {
+    items = rows.slice(0, 12);
+    if (!items.length) { list.replaceChildren(h('div', { class: 'opt none' }, note || 'No listed stock matches')); list.classList.remove('hidden'); return; }
+    list.replaceChildren(...items.map((x) => h('div', { class: 'opt', onmousedown: (e) => { e.preventDefault(); finish(x.t); }, ontouchend: (e) => { e.preventDefault(); finish(x.t); } },
+      h('span', {}, x.t), h('small', {}, [x.name, x.src].filter(Boolean).join(' · ')))));
     list.classList.remove('hidden');
   };
-  const local = (q) => suggestions.filter((s) => s.t.toLowerCase().includes(q) || s.name.toLowerCase().includes(q));
-  i.addEventListener('input', () => {
-    clearTimeout(timer); const q = i.value.trim().toLowerCase(); if (!q) { show(suggestions); return; }
-    show(local(q)); const my = ++seq;
+  const query = (q) => {
+    clearTimeout(timer); const my = ++seq;
+    if (!q) { show(suggestions); return; }
+    show([], 'Searching all NSE/BSE listings…');
     timer = setTimeout(async () => {
-      try { const r = await get('/search', { q }); if (my !== seq) return;
-        const seen = new Set(local(q).map((x) => x.t)); show([...local(q), ...r.results.filter((x) => !seen.has(x.t))]); } catch { /* keep local */ }
-    }, 220);
-  });
+      try { const r = await get('/search', { q }); if (my === seq) show(r.results || []); }
+      catch { if (my === seq) show([], 'Search is unavailable. Type the full symbol, e.g. TCS.NS'); }
+    }, 160);
+  };
+  i.addEventListener('input', () => query(i.value.trim()));
   i.addEventListener('focus', () => { if (!i.value) show(suggestions); i.select?.(); });
-  i.addEventListener('blur', () => setTimeout(hide, 120));
-  i.addEventListener('keydown', (e) => { if (e.key === 'Enter') { hide(); c._emit(); } });
+  i.addEventListener('blur', () => setTimeout(hide, 150));
+  i.addEventListener('keydown', async (e) => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); if (items.length) { cur = (cur + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length; paint(); } return; }
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    if (cur >= 0 && items[cur]) { finish(items[cur].t); return; }
+    const txt = i.value.trim(); if (!txt) return; hide();
+    try { const t = await resolveSymbol(txt); if (t) finish(t); else show([], `No listed stock matches “${txt}”`); } catch { finish(txt.toUpperCase()); }
+  });
   const c = wire(field(label, h('div', { class: 'combo' }, i, list), help, cls), () => i.value.trim(), (v) => { i.value = v; });
   return c;
 }

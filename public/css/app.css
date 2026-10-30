@@ -170,7 +170,7 @@ input[type=range] { width: 100%; accent-color: var(--gold); height: 32px; }
 .btn.primary { background: linear-gradient(180deg, #F7C25A, #E39B1B); color: #1a1200; border-color: #E39B1B; }
 .btn.primary:hover { filter: brightness(1.06); } .btn.block { width: 100%; } .btn.small { min-height: 36px; padding: 6px 12px; font-size: .85rem; }
 .btn.danger { color: #FCA5A5; border-color: rgba(239,68,68,.4); }
-.row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; } .row.end { justify-content: flex-end; } .grow { flex: 1; }
+.row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; } .row.end { justify-content: flex-end; } .grow { flex: 1 1 180px; min-width: 0; }
 .combo { position: relative; } .combo .list { position: absolute; z-index: 30; left: 0; right: 0; top: calc(100% + 4px); background: var(--panel2); border: 1px solid var(--border);
   border-radius: 10px; max-height: 280px; overflow: auto; box-shadow: var(--shadow); }
 .combo .opt { padding: 10px 12px; cursor: pointer; display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--row-line); }
@@ -269,3 +269,7 @@ table.tbl { border-collapse: separate; border-spacing: 0; width: 100%; font-vari
   input[type=text], input[type=number], input[type=search], select, textarea { font-size: 16px; }
   .tabs button { font-size: .95rem; }
 }
+
+.combo .opt.act { background: rgba(245,184,65,.16); } .combo .opt.none { color: var(--muted); cursor: default; justify-content: flex-start; }
+.combo .opt span { font-weight: 700; flex: none; } .combo .opt small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
+.row { flex-wrap: wrap; }

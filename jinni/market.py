@@ -79,7 +79,7 @@ def nse_universe(include_sme: bool = False, series: tuple = ("EQ", "BE", "BZ"), 
             df = _clean(pd.read_csv(cache), "NSE (cached today)")
         elif not demo_forced():
             for u in NSE_URLS:
-                txt = _fetch(u)
+                txt = _fetch(u, timeout=8)
                 if txt and "SYMBOL" in txt[:200].upper():
                     cache.write_text(txt)
                     df = _clean(pd.read_csv(io.StringIO(txt)), "NSE live")

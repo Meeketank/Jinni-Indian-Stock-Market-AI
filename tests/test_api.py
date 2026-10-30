@@ -356,3 +356,27 @@ def test_phone_layout_guards_are_in_place():
     assert "overflow-x: hidden" in css and "touch-action: manipulation" in css
     assert re.search(r"max-width: 640px\) \{\s*input\[type=text\].*font-size: 16px", css, re.S)  # no iOS focus-zoom
     assert "tcards" in css and "as-cards" in ui                                                         # tables become cards
+
+
+def test_search_matches_company_names_and_merges_yahoo(client, monkeypatch):
+    from server import routes_market as rm
+
+    local = rm._local_hits("TATA MOTORS")
+    assert local and all("TATA" in r["name"].upper() and "MOTORS" in r["name"].upper() for r in local)
+    assert rm._local_hits("RELIANCE")[0]["symbol"] == "RELIANCE"
+
+    class FakeSearch:
+        def __init__(self, q, **kw):
+            self.quotes = [{"symbol": "JIOFIN.NS", "quoteType": "EQUITY", "longname": "Jio Financial Services Limited"},
+                           {"symbol": "JIOFIN.BO", "quoteType": "EQUITY", "shortname": "JIOFIN"},
+                           {"symbol": "AAPL", "quoteType": "EQUITY", "shortname": "Apple"}]
+
+    class FakeYF:
+        Search = FakeSearch
+
+    monkeypatch.setattr(rm.jdata, "_yf", lambda: FakeYF())
+    monkeypatch.setattr(rm.jdata, "demo_forced", lambda: False)
+    got = rm._yahoo_hits("jio fin")
+    assert [r["t"] for r in got] == ["JIOFIN.NS", "JIOFIN.BO"]          # foreign tickers dropped
+    monkeypatch.setattr(rm.jdata, "_yf", lambda: (_ for _ in ()).throw(RuntimeError("down")))
+    assert rm._yahoo_hits("jio") == []                                  # a dead feed never breaks search

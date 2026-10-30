@@ -139,7 +139,7 @@ def prices(tickers, period: str = "2y", ttl: float = 600) -> jdata.PriceData:
 
 def need_series(pdx: jdata.PriceData, ticker: str, min_len: int = 60) -> pd.DataFrame:
     if ticker not in pdx.close or pdx.close[ticker].dropna().shape[0] < min_len:
-        raise ApiError(404, f"No price history for {ticker}. NSE symbols end in .NS and BSE in .BO.")
+        raise ApiError(404, f"No price history for {ticker}. Search by company name in the box above, or use .NS (NSE) / .BO (BSE) symbols.")
     return pdx.ohlcv(ticker)
 
 
