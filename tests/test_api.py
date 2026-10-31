@@ -502,3 +502,43 @@ def test_sentiment_says_so_when_every_feed_is_down(client, monkeypatch):
     core._MEMO.clear()
     r = client.get("/api/sentiment/live")
     assert r.status_code == 200 and "does not fill the gap" in r.text
+
+
+# ------------------------------------------------------------------ stock selection
+
+
+def test_selection_validation_is_walk_forward_and_honest():
+    from jinni import data as jd
+    from jinni import selection as sel
+    from jinni.universe import NIFTY50
+
+    tk = list(NIFTY50) + ["^NSEI"]
+    px = jd.get_prices(tk, "5y")
+    close, bench = px.close.drop(columns="^NSEI"), px.close["^NSEI"]
+    v = sel.validate(close, bench, 21)
+    assert v.stats["periods"] >= 20
+    assert abs(v.stats["ic"]) < 0.15 and abs(v.stats["excess_t"]) < 3     # random-walk data: no fake edge
+    assert v.stats["cost_drag"] > 0                                       # costs are charged
+    assert abs(v.weights_now.sum() - 1) < 1e-9 or v.weights_now.sum() == 0
+    # weights at a rebalance use only earlier IC: truncating the future leaves earlier weights unchanged
+    w_full = sel.learn_weights(v.ic.iloc[:15])
+    assert w_full.equals(sel.learn_weights(v.ic.iloc[:15].copy()))
+    w = sel.tilt_weights(pd.Series([3.0, 1.0, 0.5, 0.2, 0.1]), 0.4)
+    assert abs(w.sum() - 1) < 1e-9 and w.max() <= 0.4 + 1e-9
+
+
+@pytest.mark.parametrize("profile", ["conservative", "balanced", "aggressive"])
+def test_select_endpoint_builds_a_basket_within_budget(client, profile):
+    r = client.get(f"/api/select?profile={profile}&budget=150000&n=80&k=6")
+    assert r.status_code == 200, r.text[:300]
+    body = strict_json(r.text)
+    tb = [b for b in walk_blocks(body["blocks"]) if b["type"] == "table"][0]
+    held = sum(row["Value"] for row in tb["rows"])
+    assert 0.8 * 150000 <= held <= 150000 and 3 <= len(tb["rows"]) <= 6
+    assert all(row["Shares"] >= 1 for row in tb["rows"])
+    text_ = json.dumps(body)
+    assert "Survivorship bias" in text_ and "walk-forward" in text_.lower()
+
+
+def test_select_rejects_unknown_profile(client):
+    assert client.get("/api/select?profile=yolo").status_code == 422

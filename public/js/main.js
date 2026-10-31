@@ -5,9 +5,10 @@ import { toggle, isDark } from './theme.js';
 
 const NAV = [
   { id: 'home', label: 'Home', icon: 'home', primary: true, desc: 'Market pulse' },
+  { id: 'picks', label: 'Picks', icon: 'star', primary: true, desc: 'Validated stock selection for my budget' },
   { id: 'finder', label: 'Finder', icon: 'target', primary: true, desc: 'Which stocks can hit my target?' },
   { id: 'stock', label: 'Analyze', icon: 'chart', primary: true, desc: 'Charts, patterns, 87 indicators' },
-  { id: 'portfolio', label: 'Portfolio', icon: 'shield', primary: true, desc: 'VaR, stress tests, risk' },
+  { id: 'portfolio', label: 'Portfolio', icon: 'shield', desc: 'VaR, stress tests, risk' },
   { id: 'screener', label: 'Screener', icon: 'filter', desc: 'Rank stocks by 5 factors' },
   { id: 'events', label: 'Sentiment & Events', icon: 'event', desc: 'Market mood, event lab, calendar' },
   { id: 'optimizer', label: 'Optimizer', icon: 'tune', desc: 'Best weights, rebalance trades' },
@@ -16,7 +17,7 @@ const NAV = [
   { id: 'settings', label: 'Settings', icon: 'gear', desc: 'Assumptions, rules, backup' },
 ];
 const PAGES = {
-  home: () => import('./pages/home.js'), finder: () => import('./pages/finder.js'), stock: () => import('./pages/analyzer.js'),
+  home: () => import('./pages/home.js'), picks: () => import('./pages/picks.js'), finder: () => import('./pages/finder.js'), stock: () => import('./pages/analyzer.js'),
   portfolio: () => import('./pages/portfolio.js'), screener: () => import('./pages/screener.js'),
   events: () => import('./pages/events.js'), optimizer: () => import('./pages/optimizer.js'),
   lab: () => import('./pages/lab.js'), journal: () => import('./pages/journal.js'), settings: () => import('./pages/settings.js'),

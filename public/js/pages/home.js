@@ -3,6 +3,7 @@ import { get } from '../api.js';
 import { ctxNav, go } from './kit.js';
 
 const CARDS = [
+  ['picks', 'star', 'Smart Picks', 'Validated stock selection: ranked on proven signals, tested walk-forward, built into a risk-aware basket for your budget.'],
   ['finder', 'target', 'Return Finder', 'Pick a goal (e.g. +7% in a week) and a budget. Get ranked stocks with honest odds.'],
   ['stock', 'chart', 'Analyzer', '87 indicators, auto-detected patterns, 360° view, forecast and trade plan.'],
   ['portfolio', 'shield', 'Portfolio Risk', 'VaR / CVaR, stress tests, beta, risk contribution, liquidity.'],

@@ -14,7 +14,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from jinni import __version__
-from server import routes_finder, routes_market, routes_outlook, routes_port, routes_stock
+from server import routes_finder, routes_market, routes_outlook, routes_port, routes_select, routes_stock
 from server.core import reply
 
 log = logging.getLogger("jinni")
@@ -53,7 +53,7 @@ async def unexpected(_: Request, exc: Exception):
                         headers={"Cache-Control": "no-store"})
 
 
-for r in (routes_market.router, routes_stock.router, routes_finder.router, routes_port.router, routes_outlook.router):
+for r in (routes_market.router, routes_stock.router, routes_finder.router, routes_port.router, routes_outlook.router, routes_select.router):
     app.include_router(r, prefix="/api")
 
 
