@@ -1,4 +1,4 @@
-// Thin fetch wrapper: demo flag, timeouts, one retry on transient errors, GET de-duplication.
+// Thin fetch wrapper: timeouts, one retry on transient errors, GET de-duplication.
 import { store } from './store.js';
 
 export class ApiError extends Error {
@@ -12,7 +12,6 @@ const MEMO_MS = 60000;
 function qs(params = {}) {
   const u = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null && v !== '') u.set(k, v);
-  if (store.settings().demo) u.set('demo', '1');
   const s = u.toString();
   return s ? '?' + s : '';
 }

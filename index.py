@@ -7,7 +7,6 @@ Every endpoint returns JSON "blocks" that public/js renders (see server/core.py)
 import logging
 import os
 from pathlib import Path
-from urllib.parse import parse_qs
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -15,7 +14,6 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from jinni import __version__
-from jinni.data import DEMO_OVERRIDE
 from server import routes_finder, routes_market, routes_port, routes_stock
 from server.core import reply
 
@@ -27,26 +25,7 @@ app = FastAPI(title="JINNI API", version=__version__, docs_url="/api/docs", open
 app.add_middleware(GZipMiddleware, minimum_size=1500)
 
 
-class DemoSwitch:
-    """Pure-ASGI middleware: ?demo=1 on any /api request switches that request to synthetic data.
-    (A query parameter, not a header, so CDN caches keep demo and live responses apart.)"""
 
-    def __init__(self, app):
-        self.app = app
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] == "http":
-            qs = parse_qs(scope.get("query_string", b"").decode())
-            tok = DEMO_OVERRIDE.set(True if qs.get("demo", ["0"])[0] == "1" else None)
-            try:
-                await self.app(scope, receive, send)
-            finally:
-                DEMO_OVERRIDE.reset(tok)
-        else:
-            await self.app(scope, receive, send)
-
-
-app.add_middleware(DemoSwitch)
 
 
 @app.exception_handler(HTTPException)

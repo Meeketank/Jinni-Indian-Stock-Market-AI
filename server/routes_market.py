@@ -16,7 +16,7 @@ from jinni.universe import (BENCHMARK, INDICES, MACRO, NIFTY50, SECTOR_INDICES, 
                             normalize_symbol, sector_of)
 
 from . import figs
-from .core import (ApiError, caption, callout, col, cols, doc, inr, kpis, memo, news_list, num, pct, plot, prices,
+from .core import (ApiError, nifty50, caption, callout, col, cols, doc, inr, kpis, memo, news_list, num, pct, plot, prices,
                    reply, section, source_notice, table, tape, text, tone)
 
 router = APIRouter()
@@ -56,13 +56,19 @@ def catalog():
         "horizons": fc.HORIZONS, "strategies": bt.STRATEGIES, "objectives": opt.OBJECTIVES,
         "events": list(se.BUILTIN_EVENTS), "indices": {k: v for k, v in INDICES.items()},
         "stress": list(STRESS_SCENARIOS), "setups": list(jsetups.SETUPS), "sectors": sorted(set(NIFTY50.values())),
-    }, ttl=3600)
+        "nifty50_source": NIFTY50.source,
+    }, ttl=3600 if nifty else 60)  # do not let a failed index lookup stick in the CDN
 
 
 def _local_hits(q: str, limit: int = 12) -> list[dict]:
     """Match against every NSE-listed name (live list -> today's cache -> bundled snapshot)."""
-    uni = memo(("search-universe", jdata.demo_forced()), 3600,
-               lambda: market.bundled_universe() if jdata.demo_forced() else market.nse_universe())
+    def load():
+        try:
+            return market.demo_universe(1000) if jdata.demo_forced() else market.nse_universe()
+        except RuntimeError:
+            return pd.DataFrame({"symbol": [], "name": []})  # Yahoo search below still answers
+
+    uni = memo(("search-universe", jdata.demo_forced()), 3600, load)
     words = [w for w in q.replace("&", " & ").split() if w]
     hits = []
     for sym, name in zip(uni["symbol"], uni["name"]):
@@ -229,7 +235,7 @@ def home_movers():
 
 @router.get("/home/nifty50")
 def home_nifty50():
-    stk_t = list(NIFTY50)
+    stk_t = nifty50()
     pdx = memo(("home-n50",), 120, lambda: prices(stk_t, "1y", ttl=120))
     c = pdx.close
     blocks = source_notice(pdx.source, pdx.missing)
@@ -257,7 +263,7 @@ def home_nifty50():
 
 @router.get("/mood")
 def mood():
-    pdx = memo(("mood",), 300, lambda: prices(["^NSEI", "^INDIAVIX", "GC=F"] + list(NIFTY50), "2y", ttl=300))
+    pdx = memo(("mood",), 300, lambda: prices(["^NSEI", "^INDIAVIX", "GC=F"] + nifty50(), "2y", ttl=300))
     nifty = pdx.close["^NSEI"].dropna()
     vix = pdx.close.get("^INDIAVIX")
     gold = pdx.close.get("GC=F")

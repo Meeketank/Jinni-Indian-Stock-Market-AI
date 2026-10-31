@@ -137,6 +137,16 @@ def prices(tickers, period: str = "2y", ttl: float = 600) -> jdata.PriceData:
     return _PRICE_CACHE.put(key, pdx)
 
 
+def nifty50() -> list[str]:
+    """Current NIFTY 50 tickers (live from NSE). Raises if the list cannot be loaded, never returns a stale one."""
+    from jinni.universe import NIFTY50
+
+    t = list(NIFTY50)
+    if not t:
+        raise DataUnavailable("The NIFTY 50 constituent list could not be loaded from NSE right now.")
+    return t
+
+
 def need_series(pdx: jdata.PriceData, ticker: str, min_len: int = 60) -> pd.DataFrame:
     if ticker not in pdx.close or pdx.close[ticker].dropna().shape[0] < min_len:
         raise ApiError(404, f"No price history for {ticker}. Search by company name in the box above, or use .NS (NSE) / .BO (BSE) symbols.")

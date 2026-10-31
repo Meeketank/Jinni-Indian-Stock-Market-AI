@@ -173,15 +173,15 @@ def test_live_failure_is_an_honest_503_not_fake_data(client, monkeypatch):
     assert r.headers["cache-control"] == "no-store"
 
 
-def test_demo_query_flag_switches_per_request(client, monkeypatch):
+def test_website_has_no_demo_switch(client, monkeypatch):
     from jinni import data as jdata
 
     monkeypatch.delenv("JINNI_DEMO", raising=False)
     monkeypatch.setattr(jdata, "_download_yahoo", lambda *a, **k: None)
     assert client.get("/api/stock/DEMOFLAG1.NS/odds").status_code == 503
-    r = client.get("/api/stock/DEMOFLAG1.NS/odds?demo=1")
-    assert r.status_code == 200 and "demo" in r.text
-    assert client.get("/api/stock/DEMOFLAG1.NS/odds").status_code == 503  # the override did not leak
+    assert client.get("/api/stock/DEMOFLAG1.NS/odds?demo=1").status_code == 503  # the old query flag does nothing
+    ui = "".join(p.read_text() for p in (ROOT / "public" / "js").rglob("*.js"))
+    assert "demo" not in ui.lower().replace("'demo'", "")  # no demo toggle, banner or button left in the UI
 
 
 def test_search(client):

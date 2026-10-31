@@ -63,3 +63,37 @@ def board(kind: str, size: int = 15) -> pd.DataFrame | None:
         log.warning("NSE screener '%s' failed: %s", kind, e)
         return None
     return df if len(df) else None
+
+
+def top_by_cap(n: int = 50) -> pd.DataFrame | None:
+    """The n largest NSE stocks by market cap."""
+    if demo_forced():
+        return None
+    try:
+        resp = _yf().screen(_query(), size=n, sortField="intradaymarketcap", sortAsc=False)
+        df = _rows(resp.get("quotes", []) if isinstance(resp, dict) else [])
+    except Exception as e:  # noqa: BLE001
+        log.warning("NSE screener (top by cap) failed: %s", e)
+        return None
+    return df if len(df) else None
+
+
+def universe(max_pages: int = 14) -> pd.DataFrame | None:
+    """Every NSE-listed stock Yahoo knows, paged 250 at a time (largest first). None if unreachable."""
+    if demo_forced():
+        return None
+    from yfinance import EquityQuery
+
+    q = EquityQuery("eq", ["exchange", "NSI"])
+    rows: list[dict] = []
+    try:
+        for page in range(max_pages):
+            resp = _yf().screen(q, size=250, offset=page * 250, sortField="intradaymarketcap", sortAsc=False)
+            quotes = resp.get("quotes", []) if isinstance(resp, dict) else []
+            rows += [{"symbol": x["symbol"].rsplit(".", 1)[0], "name": x.get("longName") or x.get("shortName") or x["symbol"]}
+                     for x in quotes if str(x.get("symbol", "")).endswith(".NS")]
+            if len(quotes) < 250:
+                break
+    except Exception as e:  # noqa: BLE001
+        log.warning("NSE screener (universe) failed after %d rows: %s", len(rows), e)
+    return pd.DataFrame(rows) if rows else None

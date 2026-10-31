@@ -117,10 +117,6 @@ export class Results {
     clearInterval(this._tick);
     const actions = h('div', { class: 'row', style: { marginTop: '10px' } });
     if (retry) actions.append(h('button', { class: 'btn small', onclick: retry }, 'Try again'));
-    if (e?.code === 'data_unavailable' && !store.settings().demo) {
-      actions.append(h('button', { class: 'btn small', onclick: () => { store.saveSettings({ demo: true }); location.reload(); } },
-        'Use demo data instead'));
-    }
     this.el.replaceChildren(h('div', { class: 'callout error' }, h('strong', {}, e?.message || 'Something went wrong.'), actions));
   }
   show(blocks, ctx) { clearInterval(this._tick); this.el.replaceChildren(renderBlocks(blocks, ctx)); }
@@ -178,8 +174,7 @@ function block(b, ctx) {
     case 'tape': return tape(b.items);
     case 'news': return newsList(b.items);
     case 'badge': return h('span', { class: `badge ${b.cls}` }, b.label);
-    case 'demo': return h('div', { class: 'callout info' }, h('span', { class: 'badge b-demo' }, 'DEMO DATA'), ' ',
-      'Synthetic prices, for illustration only. Turn demo mode off in Settings to use live data.');
+    case 'demo': return document.createComment('');
     case 'stockhead': return h('div', { class: 'stockhead' }, h('h3', {}, b.name, h('span', { class: `badge ${b.cls}` }, b.rating)),
       h('div', { class: 'sub' }, [b.ticker, b.sector, b.asof ? `as of ${b.asof}` : ''].filter(Boolean).join(' · ')),
       b.sub ? h('div', { class: 'sub' }, b.sub) : null);

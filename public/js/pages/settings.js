@@ -42,18 +42,17 @@ export async function render(view) {
   }; paintWl();
   view.append(card(h('h3', {}, 'Watchlist'), wl));
 
-  const dm = Toggle({ label: 'Demo mode (synthetic prices, for previews and offline use)', value: s.demo });
   const status = new Results();
   const check = async () => {
     status.loading('Checking the data feed…');
     try { const d = await get('/health', { deep: 1 }, { fresh: true });
-      status.el.replaceChildren(h('div', { class: `callout ${d.live_data || d.demo ? 'ok' : 'error'}` }, d.demo ? 'Demo mode is on: no live request was made.' :
+      status.el.replaceChildren(h('div', { class: `callout ${d.live_data ? 'ok' : 'error'}` },
         d.live_data ? `Live data is working. Latest NIFTY close: ${d.latest}.` : `Live data is not reachable right now (${d.error || 'no response from the data provider'}).`));
     } catch (e) { status.error(e); }
   };
   const importer = FileText({ label: '', accept: '.json,application/json', button: 'Restore backup', onText: (t) => { try { store.importAll(JSON.parse(t)); toast('Backup restored'); setTimeout(() => location.reload(), 600); } catch (e) { toast(e.message); } } });
-  view.append(card(h('h3', {}, 'Data'), formGrid(dm), h('div', { class: 'row', style: { margin: '10px 0' } },
-    button('Save', () => { store.saveSettings({ demo: dm.get() }); location.reload(); }, 'primary'), button('Check live data', check), button('Clear cached results', () => { clearCache(); toast('Cache cleared'); })),
+  view.append(card(h('h3', {}, 'Data'), h('div', { class: 'row', style: { margin: '10px 0' } },
+    button('Check live data', check, 'primary'), button('Clear cached results', () => { clearCache(); toast('Cache cleared'); })),
     status.el, h('p', { class: 'hint' }, 'Prices come from Yahoo Finance and are cached for a few minutes to respect rate limits. If live data is unavailable, JINNI says so instead of showing made-up numbers.')),
     card(h('h3', {}, 'Backup'), h('p', { class: 'hint' }, 'Your holdings, watchlist, journal and settings live only in this browser. Export a backup before clearing browser data or switching devices.'),
       h('div', { class: 'row' }, button('Export backup', () => download('jinni_backup.json', JSON.stringify(store.exportAll(), null, 2), 'application/json'), '', 'download'), importer)),

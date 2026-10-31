@@ -4,7 +4,6 @@
   "functions": {
     "index.py": {
       "maxDuration": 60,
-      "includeFiles": "jinni/data_files/**",
       "excludeFiles": "{!(index).py,tests/**,legacy/**,app/**,assets/**,public/**,analytics/**,ml_models/**,online_learning/**,data_scraper/**,dashboard/**,utils/**,scripts/**,docs/**,.github/**,.devcontainer/**,.streamlit/**,*.md}"
     }
   },

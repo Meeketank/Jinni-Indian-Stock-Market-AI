@@ -17,7 +17,7 @@ from jinni import signals
 from jinni.universe import BENCHMARK, NIFTY50, STRESS_SCENARIOS, display_name, normalize_symbol, sector_of
 
 from . import figs
-from .core import (ApiError, caption, callout, col, cols, doc, inr, kpis, memo, num, pct, plot, prices, reply, section,
+from .core import (nifty50, ApiError, caption, callout, col, cols, doc, inr, kpis, memo, num, pct, plot, prices, reply, section,
                    source_notice, table, tabs, text, tone)
 
 router = APIRouter()
@@ -33,7 +33,7 @@ def tick_list(s: str, limit: int = 60) -> list[str]:
 @router.get("/screen")
 def screen(tickers: str = "nifty50", ratings: str = "STRONG BUY,BUY,HOLD,SELL,STRONG SELL", min_score: int = 0,
            max_rsi: int = 100, sectors: str = "", setups: str = ""):
-    tk = list(NIFTY50) if tickers.lower() == "nifty50" else tick_list(tickers)
+    tk = nifty50() if tickers.lower() == "nifty50" else tick_list(tickers)
     if not tk:
         raise ApiError(400, "No symbols.")
     pdx = prices(tk + [BENCHMARK], "2y", ttl=900)

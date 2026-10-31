@@ -4,7 +4,7 @@ export const DEFAULT_RULES = {
   max_loss_per_trade: 10000, max_position_pct: 0.10, max_sector_pct: 0.35, min_reward_risk: 1.5,
   cash_buffer_pct: 0.05, max_open_trades: 8, min_probability: 0.0, require_stop: true,
 };
-const DEFAULT_SETTINGS = { rf: 0.065, capital: 1000000, risk_pct: 0.01, demo: false };
+const DEFAULT_SETTINGS = { rf: 0.065, capital: 1000000, risk_pct: 0.01 };
 
 function read(key, fallback) {
   try { const v = localStorage.getItem(P + key); return v === null ? fallback : JSON.parse(v); } catch { return fallback; }

@@ -1,4 +1,4 @@
-// App shell: hash router, navigation (bottom tabs on phones, top bar on desktop), splash, demo banner.
+// App shell: hash router, navigation (bottom tabs on phones, top bar on desktop), splash.
 import { h, icon, sheet, button } from './ui.js';
 import { store } from './store.js';
 import { toggle, isDark } from './theme.js';
@@ -48,13 +48,6 @@ function buildNav(active) {
   bar.append(h('button', { type: 'button', class: secondaryActive ? 'active' : '', onclick: more }, icon('more'), secondaryActive ? secondaryActive.label.split(' ')[0] : 'More'));
 }
 
-function banner() {
-  const root = document.getElementById('banner-root'); root.replaceChildren();
-  if (!store.settings().demo) return;
-  root.append(h('div', { class: 'banner' }, h('span', { class: 'badge b-demo' }, 'DEMO MODE'), 'All numbers are synthetic.',
-    button('Switch to live data', () => { store.saveSettings({ demo: false }); location.reload(); }, 'small')));
-}
-
 async function route() {
   const token = ++navToken; const { id, params } = parse();
   buildNav(id); try { cleanup?.(); } catch { /* ignore */ } cleanup = null;
@@ -85,6 +78,6 @@ function themeBtn() {
   b.addEventListener('click', toggle); window.addEventListener('jinni:theme', paint); paint();
 }
 
-themeBtn(); banner(); splash();
+themeBtn(); splash();
 window.addEventListener('hashchange', route);
 route();

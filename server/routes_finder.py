@@ -18,7 +18,7 @@ from jinni import riskcheck as rc
 from jinni.universe import BENCHMARK, NIFTY50, display_name, normalize_symbol, sector_of
 
 from . import figs
-from .core import (ApiError, caption, callout, col, cols, doc, kpis, memo, news_list, pct, plot, prices, reply,
+from .core import (ApiError, DataUnavailable, caption, callout, col, cols, doc, kpis, memo, news_list, pct, plot, prices, reply,
                    section, source_notice, table, tabs, text, tone)
 from .routes_stock import ctx as stock_ctx, news_of
 
@@ -32,7 +32,10 @@ DEADLINE_S = 42  # stay well inside the function's 60 s limit
 @router.get("/market/universe")
 def universe(sme: int = 0):
     def build():
-        return market.demo_universe() if jdata.demo_forced() else market.nse_universe(include_sme=bool(sme))
+        try:
+            return market.demo_universe() if jdata.demo_forced() else market.nse_universe(include_sme=bool(sme))
+        except RuntimeError as e:
+            raise DataUnavailable(str(e)) from e
 
     uni = memo(("universe", int(sme)), 6 * 3600, build)
     return reply({"source": uni.attrs.get("source", ""), "count": len(uni),
