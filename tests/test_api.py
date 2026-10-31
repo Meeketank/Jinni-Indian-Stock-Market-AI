@@ -395,3 +395,110 @@ def test_new_listing_shows_what_exists_and_explains_the_rest(client, monkeypatch
     for tab in ("chart", "patterns", "indicators", "odds"):
         r = client.get(f"/api/stock/NEWLIST1.NS/{tab}")
         assert r.status_code == 422 and r.json()["code"] == "new_listing" and "unlock" in r.json()["error"]
+
+
+# ---------------------------------------------------------------- outlook & live sentiment
+
+RSS = b"""<rss><channel>
+<item><title>Sensex surges 600 points as FII inflows rebound - Mint</title><source>Mint</source><pubDate>{d}</pubDate><link>http://a</link></item>
+<item><title>Exit polls ahead of results tomorrow, markets await outcome - ET</title><source>ET</source><pubDate>{d}</pubDate><link>http://b</link></item>
+<item><title>RBI MPC meeting next week: rate cut hopes lift banks - Moneycontrol</title><source>Moneycontrol</source><pubDate>{d}</pubDate><link>http://c</link></item>
+<item><title>Crude oil slumps as war fears ease - Reuters</title><source>Reuters</source><pubDate>{d}</pubDate><link>http://d</link></item>
+<item><title>Sensex surges 600 points as FII inflows rebound - Mint</title><source>Mint</source><pubDate>{d}</pubDate><link>http://a</link></item>
+</channel></rss>"""
+
+
+def _fake_feeds(monkeypatch):
+    from email.utils import format_datetime
+
+    from jinni import newsfeeds as nf
+
+    body = RSS.replace(b"{d}", format_datetime(pd.Timestamp.now(tz="UTC").to_pydatetime()).encode())
+    from server import core
+
+    core._MEMO.clear()
+    monkeypatch.setattr(nf, "demo_forced", lambda: False)
+    monkeypatch.setattr(nf, "_get", lambda url, timeout=7: body if "gdelt" not in url else json.dumps(
+        {"timeline": [{"series": "Average Tone", "data": [
+            {"date": (pd.Timestamp.now() - pd.Timedelta(days=60 - i)).strftime("%Y%m%dT000000Z"),
+             "value": float(np.sin(i / 5))} for i in range(60)]}]}).encode())
+    return nf
+
+
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+
+
+def test_news_pipeline_scores_dedupes_and_flags_events(monkeypatch):
+    nf = _fake_feeds(monkeypatch)
+    df, status = nf.fetch_all()
+    assert len(df) == 4                                         # the duplicate headline collapses
+    assert set(df.columns) >= {"Headline", "Source", "Tone", "Topics"}
+    assert df.loc[df["Headline"].str.startswith("Sensex surges"), "Tone"].iloc[0] > 0.2
+    radar = nf.event_radar(pd.concat([df] * 3, ignore_index=True))
+    assert "Election / results" in set(radar["Event"]) and radar.iloc[0]["Imminent"] >= 1
+    assert any("Central banks" in t for t in df["Topics"].sum())
+    assert all(isinstance(v, int) for v in status.values())     # every fake feed answered
+
+
+def test_unreachable_feeds_mean_no_headlines_not_fake_ones(monkeypatch):
+    from jinni import newsfeeds as nf
+
+    monkeypatch.setattr(nf, "demo_forced", lambda: False)
+    monkeypatch.setattr(nf, "_get", lambda *a, **k: None)
+    df, status = nf.fetch_all()
+    assert df.empty and set(status.values()) == {"unreachable"}
+
+
+def test_gdelt_parser_and_tone_backtest(monkeypatch):
+    nf = _fake_feeds(monkeypatch)
+    from jinni import outlook as ol
+
+    tone = nf.gdelt_tone()
+    assert tone is not None and len(tone) == 60
+    close = pd.Series(100 + np.cumsum(np.random.default_rng(1).normal(0, 1, 90)), index=pd.bdate_range(end=pd.Timestamp.now().normalize(), periods=90))
+    bt = ol.tone_vs_next_day(tone, close)
+    assert bt and 25 <= bt["n"] <= 60 and -1 <= bt["rho"] <= 1 and 0 <= bt["p"] <= 1
+    assert nf.parse_gdelt_timeline(b"not json") is None
+
+
+def test_outlook_is_validated_capped_and_honest():
+    from jinni import data as jd
+    from jinni import outlook as ol
+
+    px = jd.get_prices(ol.TICKERS, "10y")
+    o = ol.fit_outlook(px.ohlcv("^NSEI"), px.close.drop(columns=["^NSEI"]), 1, True)
+    assert 0.03 < o.p_cal < 0.97 and o.n_oos > 1000 and len(o.folds) >= 4
+    assert 0.40 < o.auc < 0.62                          # synthetic random-walk data: must not claim a big edge
+    assert o.edge in {"none", "weak"}
+    assert len(o.drivers) == 8 and o.drivers["Push"].abs().iloc[0] >= o.drivers["Push"].abs().iloc[-1]
+    # tilt: capped at +/-3 points, zero without enough headlines
+    assert 0.028 <= ol.tilt(0.5, 1.0, 500)["shift"] <= ol.CAP
+    assert -ol.CAP <= ol.tilt(0.5, -1.0, 500)["shift"] <= -0.028
+    assert ol.tilt(0.5, 0.9, 3)["shift"] == 0.0
+
+
+@pytest.mark.parametrize("url", ["/api/outlook/market?h=1", "/api/outlook/market?h=5", f"/api/stock/{T}/outlook?h=1",
+                                  "/api/sentiment/live"])
+def test_outlook_and_sentiment_endpoints(client, monkeypatch, url):
+    _fake_feeds(monkeypatch)
+    r = client.get(url)
+    assert r.status_code == 200, r.text[:300]
+    body = strict_json(r.text)
+    text_ = json.dumps(body)
+    if "outlook" in url:
+        assert "not a prediction you can rely on" in text_ and "AUC" in text_
+    else:
+        assert "Event radar" in text_ and "Source status" in text_
+
+
+def test_sentiment_says_so_when_every_feed_is_down(client, monkeypatch):
+    from jinni import newsfeeds as nf
+
+    monkeypatch.setattr(nf, "demo_forced", lambda: False)
+    monkeypatch.setattr(nf, "_get", lambda *a, **k: None)
+    from server import core
+
+    core._MEMO.clear()
+    r = client.get("/api/sentiment/live")
+    assert r.status_code == 200 and "does not fill the gap" in r.text

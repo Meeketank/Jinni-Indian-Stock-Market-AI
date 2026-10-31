@@ -5,9 +5,15 @@ import { livePanel, showIf } from './kit.js';
 
 export async function render(view) {
   const cat = await catalog();
-  view.append(pageHead('Sentiment & Events', 'Market mood, news tone, and an event lab that answers "when X happens, does the market always react?".'));
+  view.append(pageHead('Sentiment & Events', 'ML outlook, live multi-source news sentiment, market mood and an event lab that answers "when X happens, does the market always react?".'));
   const measure = [...Object.entries(cat.indices), ...cat.nifty50.map((x) => [x.t, x.name])];
   const tabs = [
+    { label: 'Outlook', load: (p) => {
+      p.append(h('p', { class: 'page-sub' }, 'A machine-learning estimate of where NIFTY heads next, built from global cues (US close, Asia, crude, gold, dollar, rupee, yields, VIX) plus a small tilt from live news. It always shows how well it did on data it had never seen.'));
+      const hz = Segmented({ label: 'Horizon', options: [[1, 'Next session'], [5, 'Next 5 sessions']], value: 1 });
+      livePanel(p, [hz], () => get('/outlook/market', { h: hz.get() }));
+    } },
+    { label: 'Live news', load: (p) => livePanel(p, [], () => get('/sentiment/live')) },
     { label: 'Market mood', load: (p) => livePanel(p, [], () => get('/mood')) },
     { label: 'News tone', load: (p) => {
       const sy = TextInput({ label: 'Symbols', value: ['^NSEI', ...store.watchlist().slice(0, 5)].join(', ') || '^NSEI', help: 'Comma separated, e.g. ^NSEI, RELIANCE, TCS' });

@@ -20,10 +20,11 @@ What to know:
 | **Bundle size** | ~215 MiB of Vercel's **225 MiB** uncompressed Python limit (measured with the real `vercel build`): only NumPy, pandas, SciPy, yfinance and FastAPI. Gradient boosting, isotonic calibration and Ledoit-Wolf live in `jinni/mlcore.py` (no scikit-learn); `scripts/vercel_prune.py` strips unused SciPy modules, and CI fails if the bundle grows past 220 MiB. |
 | **Time limit** | `maxDuration` is 60 s (works on Hobby). Heavy work is split so no request nears it: the whole-market scan is driven by the browser in chunks of 100 stocks, and the deep analysis covers at most 70 stocks per request. |
 | **No server state** | Holdings, watchlist, journal and settings live in the browser (`localStorage`). Export a backup in **Settings**. |
+| **Sentiment & outlook** | Live news from Google News (9 themes), five publisher feeds, Yahoo and GDELT tone; an ML next-session/5-session direction estimate for NIFTY and any stock, validated walk-forward and shown with its out-of-sample AUC. News only tilts it by at most ±3 points. |
 | **Light by default** | Opens in light mode like the original app; switch to dark with the sun/moon button or in **Settings → Appearance** (Light / Dark / Match device). |
 | **Caching** | Read-only endpoints send `s-maxage`, so Vercel's CDN serves repeat requests instantly; the function also caches downloads in memory while warm. |
 | **Data source** | Yahoo Finance via `yfinance`. Shared cloud IPs are sometimes rate-limited by Yahoo; JINNI then returns a clear "live data unavailable" message (never made-up numbers) and offers an explicit demo mode. |
-| **Stock list** | Fetched from NSE when reachable, otherwise a bundled snapshot (`jinni/data_files`), or upload `EQUITY_L.csv` in the Finder. |
+| **Stock list** | Always live: NSE's EQUITY_L file, then Yahoo's screener (paged) if NSE is unreachable. NIFTY 50 membership comes from NSE's index file. Nothing is bundled or hard-coded; if no source answers, the app says so. |
 | **Security** | Strict CSP (no inline scripts, no third-party scripts: Plotly is vendored in `public/vendor`), `X-Frame-Options: DENY`, no secrets, no cookies. |
 | **Env vars** | `JINNI_DEMO=1` forces synthetic data (handy for preview deployments). |
 

@@ -42,6 +42,7 @@ export async function render(view) {
   loadPulse();
   const timer = setInterval(() => { if (!pulse.el.isConnected) clearInterval(timer); else if (!document.hidden) loadPulse(true); }, 60000);
   section('Today’s movers · all NSE stocks', '/home/movers', 'Reading live quotes for the whole exchange…', 60000);
+  section('Market outlook · ML estimate', '/outlook/market?h=1', 'Training the outlook model on 10 years of global cues…');
   section('Sector rotation', '/home/sectors', 'Reading sector indices…');
   section('NIFTY 50 stocks', '/home/nifty50', 'Reading all 50 constituents…');
   view.append(h('div', { class: 'section-title' }, 'Workspaces'),

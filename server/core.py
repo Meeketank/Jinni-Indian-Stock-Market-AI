@@ -108,6 +108,10 @@ class TTLCache:
             self._d[key] = (time.time(), value)
         return value
 
+    def clear(self) -> None:
+        with self._lock:
+            self._d.clear()
+
 
 _PRICE_CACHE = TTLCache(96)
 _MEMO = TTLCache(256)

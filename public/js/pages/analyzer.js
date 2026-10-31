@@ -40,6 +40,8 @@ export async function render(view, params) {
       const hz = Segmented({ label: 'Look-ahead for history stats (trading days)', options: [5, 10, 20], value: 10 });
       livePanel(p, [zm, hz], () => api('patterns', { h: hz.get(), ...zm.get() })); } },
     { label: 'Indicators', load: (p) => livePanel(p, [], () => api('indicators')) },
+    { label: 'Outlook', load: (p) => { const hz = Segmented({ label: 'Horizon', options: [[1, 'Next session'], [5, '5 sessions'], [10, '10 sessions']], value: 1 });
+      livePanel(p, [hz], () => api('outlook', { h: hz.get() })); } },
     { label: 'Return odds', load: (p) => {
       const g = Segmented({ label: 'Goal', options: [[0.02, '+2%'], [0.03, '+3%'], [0.05, '+5%'], [0.07, '+7%'], [0.1, '+10%'], [0.15, '+15%'], [0.2, '+20%']], value: 0.05 });
       const w = Span({ label: 'Within', n: 1, unit: 'month', units: SPAN_UNITS.slice(0, 5), presets: [[1, 'week'], [2, 'week'], [1, 'month'], [3, 'month'], [6, 'month'], [1, 'year']], max: 250 });
