@@ -36,69 +36,8 @@ MACRO = {
     "BZ=F": "Brent",
 }
 
-# NIFTY 50 constituents (late-2025 composition) with GICS-style sectors.
-# Index changes are applied by NSE twice a year; tickers that fail to load are
-# skipped automatically, so a stale entry never breaks the app.
-NIFTY50 = {
-    "ADANIENT.NS": "Metals & Mining",
-    "ADANIPORTS.NS": "Services",
-    "APOLLOHOSP.NS": "Healthcare",
-    "ASIANPAINT.NS": "Consumer Durables",
-    "AXISBANK.NS": "Financials",
-    "BAJAJ-AUTO.NS": "Auto",
-    "BAJFINANCE.NS": "Financials",
-    "BAJAJFINSV.NS": "Financials",
-    "BEL.NS": "Capital Goods",
-    "BHARTIARTL.NS": "Telecom",
-    "CIPLA.NS": "Healthcare",
-    "COALINDIA.NS": "Energy",
-    "DRREDDY.NS": "Healthcare",
-    "EICHERMOT.NS": "Auto",
-    "ETERNAL.NS": "Consumer Services",
-    "GRASIM.NS": "Materials",
-    "HCLTECH.NS": "IT",
-    "HDFCBANK.NS": "Financials",
-    "HDFCLIFE.NS": "Financials",
-    "HINDALCO.NS": "Metals & Mining",
-    "HINDUNILVR.NS": "FMCG",
-    "ICICIBANK.NS": "Financials",
-    "INDIGO.NS": "Services",
-    "INFY.NS": "IT",
-    "ITC.NS": "FMCG",
-    "JIOFIN.NS": "Financials",
-    "JSWSTEEL.NS": "Metals & Mining",
-    "KOTAKBANK.NS": "Financials",
-    "LT.NS": "Construction",
-    "M&M.NS": "Auto",
-    "MARUTI.NS": "Auto",
-    "MAXHEALTH.NS": "Healthcare",
-    "NESTLEIND.NS": "FMCG",
-    "NTPC.NS": "Power",
-    "ONGC.NS": "Energy",
-    "POWERGRID.NS": "Power",
-    "RELIANCE.NS": "Energy",
-    "SBILIFE.NS": "Financials",
-    "SBIN.NS": "Financials",
-    "SHRIRAMFIN.NS": "Financials",
-    "SUNPHARMA.NS": "Healthcare",
-    "TATACONSUM.NS": "FMCG",
-    "TMPV.NS": "Auto",
-    "TATASTEEL.NS": "Metals & Mining",
-    "TCS.NS": "IT",
-    "TECHM.NS": "IT",
-    "TITAN.NS": "Consumer Durables",
-    "TRENT.NS": "Consumer Services",
-    "ULTRACEMCO.NS": "Materials",
-    "WIPRO.NS": "IT",
-}
-
-# Old tickers that users commonly type, mapped to the current listing.
-ALIASES = {
-    "HDFC": "HDFCBANK",          # merged into HDFC Bank, July 2023
-    "ZOMATO": "ETERNAL",         # renamed March 2025
-    "TATAMOTORS": "TMPV",        # demerged Oct 2025 (passenger vehicles)
-    "MM": "M&M",
-}
+# NIFTY 50 membership and sectors come live from NSE (see constituents.py); nothing is hard-coded here.
+from .constituents import NIFTY50  # noqa: E402,F401
 
 # Historical stress windows replayed against today's portfolio.
 STRESS_SCENARIOS = {
@@ -119,7 +58,6 @@ def normalize_symbol(raw: str) -> str:
     if s.startswith("^") or "=" in s:
         return s
     base, dot, suffix = s.partition(".")
-    base = ALIASES.get(base, base)
     if dot and suffix in {"NS", "BO"}:
         return f"{base}.{suffix}"
     return f"{base}.NS"
@@ -137,4 +75,4 @@ def display_name(symbol: str) -> str:
 
 
 def sector_of(symbol: str) -> str:
-    return NIFTY50.get(symbol, "Other")
+    return NIFTY50.get(symbol, "Other")  # live NSE industry for index members, else unknown

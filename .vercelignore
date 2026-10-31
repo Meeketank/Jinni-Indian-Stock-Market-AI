@@ -1,0 +1,40 @@
+# Files Vercel should not upload or bundle. The function only needs index.py, server/ and jinni/.
+# (Kept here rather than in vercel.json: functions.excludeFiles is limited to 256 characters.)
+
+# docs, tests, tooling
+legacy/
+tests/
+.devcontainer/
+.streamlit/
+.github/
+assets/
+docs/
+*.md
+requirements-streamlit.txt
+requirements-dev.txt
+dev.py
+
+# original Streamlit UI (cannot run on Vercel)
+streamlit_app.py
+app/
+
+# older experimental modules that the web API does not import
+main.py
+run.py
+config.py
+firebase_config.py
+risk_analytics.py
+portfolio_optimizer.py
+continuous_learner.py
+advanced_models.py
+autonomous_market_analyzer.py
+automated_retraining.py
+recommendation_engine.py
+local_storage.py
+performance_tracker.py
+online_learning/
+ml_models/
+analytics/
+data_scraper/
+dashboard/
+utils/

@@ -20,7 +20,6 @@ def market():
 
 def test_normalize_symbol():
     assert normalize_symbol("tcs") == "TCS.NS"
-    assert normalize_symbol("HDFC") == "HDFCBANK.NS"  # merged ticker
     assert normalize_symbol("reliance.bo") == "RELIANCE.BO"
     assert normalize_symbol("^NSEI") == "^NSEI"
 

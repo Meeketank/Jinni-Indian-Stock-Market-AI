@@ -1,0 +1,25 @@
+[project]
+name = "jinni"
+version = "2.0.0"
+description = "Indian market risk and analytics terminal (NSE/BSE): API and web app."
+requires-python = ">=3.12"
+# Keep in sync with requirements.txt (tests/test_api.py checks this).
+dependencies = [
+    "fastapi>=0.115,<1",
+    "numpy>=2.0,<3",
+    "pandas>=2.2,<4",
+    "scipy>=1.13,<2",
+    "yfinance>=0.2.54,<2",
+]
+
+[tool.uv]
+package = false
+# yfinance lists lxml (12 MB) but only needs it for HTML scraping that JINNI never calls; it parses with
+# html.parser. The marker below is never true, which removes lxml from the install to save bundle size.
+override-dependencies = ["lxml; python_version < '0'"]
+
+[tool.vercel]
+entrypoint = "index:app"
+
+[tool.vercel.scripts]
+build = "python scripts/vercel_prune.py"

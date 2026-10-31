@@ -209,3 +209,8 @@ __marimo__/
 # JINNI app
 jinni.db
 *.db
+
+# Vercel / Node tooling
+.vercel
+node_modules/
+.pytest_cache/

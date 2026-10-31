@@ -1,0 +1,6 @@
+# Optional: the original Streamlit UI (streamlit_app.py). Not used by the Vercel deployment.
+-r requirements.txt
+streamlit>=1.50
+plotly>=5.20
+# Optional: mirror saved analyses to Firestore when GOOGLE_APPLICATION_CREDENTIALS is set
+# google-cloud-firestore>=2.13

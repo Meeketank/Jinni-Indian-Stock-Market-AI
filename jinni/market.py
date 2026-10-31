@@ -27,8 +27,9 @@ from .universe import NIFTY50
 log = logging.getLogger(__name__)
 
 HERE = Path(__file__).resolve().parent
-FALLBACK = HERE / "data_files" / "EQUITY_L_fallback.csv"
-CACHE_DIR = Path(os.getenv("JINNI_CACHE", Path.home() / ".cache" / "jinni"))
+from .paths import cache_dir  # noqa: E402
+
+CACHE_DIR = cache_dir()
 NSE_URLS = [
     "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv",
     "https://archives.nseindia.com/content/equities/EQUITY_L.csv",
@@ -77,13 +78,23 @@ def nse_universe(include_sme: bool = False, series: tuple = ("EQ", "BE", "BZ"), 
             df = _clean(pd.read_csv(cache), "NSE (cached today)")
         elif not demo_forced():
             for u in NSE_URLS:
-                txt = _fetch(u)
+                txt = _fetch(u, timeout=8)
                 if txt and "SYMBOL" in txt[:200].upper():
                     cache.write_text(txt)
                     df = _clean(pd.read_csv(io.StringIO(txt)), "NSE live")
                     break
+        if df is None and not demo_forced():
+            from . import live
+
+            scr = live.universe()
+            if scr is not None:
+                scr["series"], scr["isin"] = "EQ", ""
+                scr = scr.rename(columns={"symbol": "SYMBOL", "name": "NAME OF COMPANY", "series": "SERIES", "isin": "ISIN NUMBER"})
+                df = _clean(scr, "Yahoo (NSE list unreachable)")
+        if df is None and demo_forced():
+            df = _fixture_universe("test fixture")
         if df is None:
-            df = _clean(pd.read_csv(FALLBACK), "bundled snapshot (older; may miss recent listings)")
+            raise RuntimeError("The NSE stock list could not be loaded from NSE or Yahoo right now.")
         if include_sme and not demo_forced():
             txt = _fetch(SME_URL)
             if txt:
@@ -141,14 +152,22 @@ def bulk_prices(tickers: list[str], period: str = "1y", chunk: int = 150, progre
     return out
 
 
+def _fixture_universe(label: str) -> pd.DataFrame:
+    """Offline test stock list (tests/fixtures/EQUITY_L.csv). Only reachable when JINNI_DEMO is set."""
+    fx = os.getenv("JINNI_FIXTURES")
+    if not fx or not (Path(fx) / "EQUITY_L.csv").exists():
+        raise RuntimeError("No offline stock list available.")
+    return _clean(pd.read_csv(Path(fx) / "EQUITY_L.csv"), label)
+
+
 def demo_universe(n: int = 300) -> pd.DataFrame:
-    """In demo mode, a manageable slice of the real symbol list."""
-    base = _clean(pd.read_csv(FALLBACK), "bundled snapshot (demo)")
+    """Tests only: a manageable slice of the fixture list."""
+    base = _fixture_universe("test fixture")
     base = base[base["series"] == "EQ"]
     nifty = pd.DataFrame({"symbol": [t[:-3] for t in NIFTY50], "name": [t[:-3] for t in NIFTY50],
                           "series": "EQ", "isin": "", "ticker": list(NIFTY50)})
     out = pd.concat([nifty, base.sample(min(n, len(base)), random_state=1)]).drop_duplicates("ticker")
-    out.attrs["source"] = "bundled snapshot (demo)"
+    out.attrs["source"] = "test fixture"
     return out.reset_index(drop=True)
 
 
