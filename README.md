@@ -23,7 +23,7 @@ What to know:
 | **Sentiment & outlook** | Live news from Google News (9 themes), five publisher feeds, Yahoo and GDELT tone; an ML next-session/5-session direction estimate for NIFTY and any stock, validated walk-forward and shown with its out-of-sample AUC. News only tilts it by at most ±3 points. |
 | **Light by default** | Opens in light mode like the original app; switch to dark with the sun/moon button or in **Settings → Appearance** (Light / Dark / Match device). |
 | **Caching** | Read-only endpoints send `s-maxage`, so Vercel's CDN serves repeat requests instantly; the function also caches downloads in memory while warm. |
-| **Data source** | Yahoo Finance via `yfinance`. Shared cloud IPs are sometimes rate-limited by Yahoo; JINNI then returns a clear "live data unavailable" message (never made-up numbers) and offers an explicit demo mode. |
+| **Data source** | Yahoo Finance via `yfinance`. Shared cloud IPs are sometimes rate-limited by Yahoo; JINNI then returns a clear "live data unavailable" message (never made-up numbers). |
 | **Stock list** | Always live: NSE's EQUITY_L file, then Yahoo's screener (paged) if NSE is unreachable. NIFTY 50 membership comes from NSE's index file. Nothing is bundled or hard-coded; if no source answers, the app says so. |
 | **Security** | Strict CSP (no inline scripts, no third-party scripts: Plotly is vendored in `public/vendor`), `X-Frame-Options: DENY`, no secrets, no cookies. |
 | **Env vars** | `JINNI_DEMO=1` forces synthetic data (handy for preview deployments). |
@@ -32,7 +32,7 @@ Run it locally (API and front end on one port):
 
 ```bash
 pip install -r requirements-dev.txt
-python dev.py                # http://localhost:8000   (JINNI_DEMO=1 python dev.py for offline demo data)
+python dev.py                # http://localhost:8000   (JINNI_DEMO=1 uses synthetic data, for tests only; the website has no demo mode)
 pytest -q                    # 85 tests
 ```
 
