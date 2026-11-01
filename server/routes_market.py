@@ -17,7 +17,7 @@ from jinni.universe import (BENCHMARK, INDICES, MACRO, NIFTY50, SECTOR_INDICES, 
 
 from . import figs
 from .core import (ApiError, nifty50, caption, callout, col, cols, doc, inr, kpis, memo, news_list, num, pct, plot, prices,
-                   reply, section, source_notice, table, tape, text, tone)
+                   reply, section, source_notice, table, tabs, tape, text, tone)
 
 router = APIRouter()
 
@@ -208,29 +208,48 @@ def home_sectors():
 
 
 @router.get("/home/movers")
-def home_movers():
-    """Live NSE-wide gainers, losers and most-active stocks (market cap above ₹500 cr, price above ₹20)."""
-    from jinni import live
+def home_movers(min_cr: float = Query(1.0, ge=0, le=100)):
+    """Gainers, losers and most-active across ALL listed stocks, NSE and BSE (one row per company, NSE preferred).
 
-    def build():
-        return {k: live.board(k, 15) for k in live.BOARDS}
+    Source: the exchanges' official end-of-day files, so every listing is covered and the date is exact. Stocks that
+    traded less than ``min_cr`` crore rupees are left out so a handful of shares cannot top the list."""
+    from jinni import bhav
 
-    boards = memo(("home-movers", jdata.demo_forced()), 60, build)
+    df, info = memo(("bhav",), 900, bhav.latest)
     blocks = []
-    if jdata.demo_forced():
-        blocks.append({"type": "demo"})
-        blocks.append(callout("info", "Live market-wide movers are not shown in demo mode."))
-        return reply(doc(blocks, "demo"), ttl=60)
-    got = {k: v for k, v in boards.items() if v is not None}
-    if not got:
-        blocks.append(callout("warn", "The live market-wide movers feed is not reachable right now. The NIFTY 50 table "
-                                      "below still updates from daily prices."))
-        return reply(doc(blocks, "live"))
-    names = {"gainers": "Top gainers", "losers": "Top losers", "active": "Most active"}
-    blocks.append(tabs([(names[k], [_board_table(v)]) for k, v in got.items()]))
-    blocks.append(caption("Every NSE-listed stock above ₹500 cr market cap and ₹20, ranked live by today's % change or volume. "
-                          "Tap a row to analyse it."))
-    return reply(doc(blocks, "live"), ttl=60)
+    if df.empty:
+        # Last resort: Yahoo's live screener (NSE + BSE) when the exchange files cannot be fetched.
+        from jinni import live
+
+        boards = memo(("home-movers-live",), 60, lambda: {k: live.board(k, 15) for k in live.BOARDS})
+        got = {k: v for k, v in boards.items() if v is not None}
+        if not got:
+            blocks.append(callout("warn", "Neither the NSE/BSE end-of-day files nor the live screener could be reached right now, "
+                                          "so there are no movers to show. JINNI will not guess."))
+            return reply(doc(blocks, "live"))
+        names = {"gainers": "Top gainers", "losers": "Top losers", "active": "Most active"}
+        blocks.append(tabs([(names[k], [_board_table(v)]) for k, v in got.items()]))
+        blocks.append(caption("Live screener fallback (NSE and BSE)."))
+        return reply(doc(blocks, "live"), ttl=60)
+    d = df[(df["turnover"] >= min_cr * 1e7) & (df["close"] >= 5)].copy()
+    d["Cap"] = d["turnover"] / 1e7
+    d["Stock"] = d["name"] + d["exch"].map(lambda e: "" if e == "NSE" else " (BSE)")
+    cc = [col("Stock", "Stock"), col("exch", "Exch"), col("close", "Price ₹", "inr2"), col("chg", "Today", "spct2"),
+          col("Cap", "Turnover ₹ cr", "n1"), col("volume", "Volume", "int")]
+    sel = {"key": "ticker", "action": "analyze"}
+    cols_ = ["ticker", "Stock", "exch", "close", "chg", "Cap", "volume"]
+    when = f"{info['date']:%d %b %Y}" if info.get("date") else "latest"
+    blocks.append(tabs([
+        ("Top gainers", [table(d.nlargest(20, "chg")[cols_], cc, select=sel)]),
+        ("Top losers", [table(d.nsmallest(20, "chg")[cols_], cc, select=sel)]),
+        ("Most active", [table(d.nlargest(20, "Cap")[cols_], cc, select=sel)])]))
+    adv, dec = int((d["chg"] > 0).sum()), int((d["chg"] < 0).sum())
+    blocks.append(kpis([("Stocks covered", f"{len(df):,}", f"{(df['exch'] == 'NSE').sum():,} NSE · {(df['exch'] == 'BSE').sum():,} BSE-only"),
+                        ("Advancing / declining", f"{adv:,} / {dec:,}", f"stocks trading ≥ ₹{min_cr:g} cr", "up" if adv >= dec else "down"),
+                        ("Data", when, info.get("source", ""))]))
+    blocks.append(caption(f"All NSE and BSE listings from the exchanges' official end-of-day files, {when} close. Cross-listed "
+                          "companies appear once (NSE). BSE-only stocks are marked (BSE). Tap a row to analyse it."))
+    return reply(doc(blocks, "live"), ttl=300)
 
 
 @router.get("/home/nifty50")

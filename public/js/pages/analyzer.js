@@ -8,9 +8,15 @@ const LAYER_DEFAULT = ['Candlestick patterns', 'Chart patterns', 'Trendlines', '
 
 export async function render(view, params) {
   const [cat, sugg] = await Promise.all([catalog(), niftySuggest()]);
-  const ticker = decodeURIComponent(params[0] || store.last('stock', 'RELIANCE.NS'));
-  store.saveLast('stock', ticker);
+  const ticker = decodeURIComponent(params[0] || store.last('stock', ''));
   view.append(pageHead('Analyzer', 'Charts with auto-detected patterns, 87 indicators, odds, seasonality and a trade plan for any NSE/BSE stock.'));
+  if (!ticker) {  // nothing chosen yet: ask, instead of showing a made-up default stock
+    const first = SymbolInput({ label: 'Search any listed stock (NSE or BSE)', value: '', suggestions: sugg });
+    first.onChange(() => { const v = first.get(); if (v) go(`#/stock/${encodeURIComponent(v.toUpperCase())}`); });
+    view.append(card(first.el), h('p', { class: 'hint' }, 'Type a company name or symbol, then pick it from the list.'), disclaimer());
+    return;
+  }
+  store.saveLast('stock', ticker);
   const sym = SymbolInput({ label: 'Stock', value: ticker, suggestions: sugg });
   sym.onChange(() => { const v = sym.get(); if (v) go(`#/stock/${encodeURIComponent(v.toUpperCase())}`); });
   const watch = () => {

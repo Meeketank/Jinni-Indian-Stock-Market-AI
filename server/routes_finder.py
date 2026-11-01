@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import numpy as np
@@ -13,7 +14,7 @@ from pydantic import BaseModel, Field
 from jinni import data as jdata
 from jinni import events as jevents
 from jinni import forecast as fc
-from jinni import market, risk, setups
+from jinni import market, risk, setups, signals
 from jinni import riskcheck as rc
 from jinni.universe import BENCHMARK, NIFTY50, display_name, normalize_symbol, sector_of
 
@@ -30,16 +31,26 @@ DEADLINE_S = 42  # stay well inside the function's 60 s limit
 
 
 @router.get("/market/universe")
-def universe(sme: int = 0):
+def universe(sme: int = 0, min_val: float = Query(1.0, ge=0), min_px: float = Query(20, ge=0)):
+    """Every liquid listed stock on NSE and BSE (cross-listings once). Falls back to the NSE list alone if the
+    exchanges' end-of-day files are unreachable."""
+    from jinni import bhav
+
     def build():
+        if not jdata.demo_forced():
+            df, info = bhav.latest()
+            if len(df):
+                keep = df[(df["turnover"] >= min_val * 1e7) & (df["close"] >= min_px)].sort_values("turnover", ascending=False)
+                src = f"{info['source']} ({info['date']:%d %b %Y}): {len(df):,} listed, {len(keep):,} trade ≥ ₹{min_val:g} cr and ≥ ₹{min_px:g}"
+                return keep["ticker"].tolist(), keep["name"].tolist(), keep["exch"].tolist(), len(df), src
         try:
-            return market.demo_universe() if jdata.demo_forced() else market.nse_universe(include_sme=bool(sme))
+            u = market.demo_universe() if jdata.demo_forced() else market.nse_universe(include_sme=bool(sme))
         except RuntimeError as e:
             raise DataUnavailable(str(e)) from e
+        return u["ticker"].tolist(), u["name"].tolist(), ["NSE"] * len(u), len(u), u.attrs.get("source", "")
 
-    uni = memo(("universe", int(sme)), 6 * 3600, build)
-    return reply({"source": uni.attrs.get("source", ""), "count": len(uni),
-                  "rows": [[s, n] for s, n in zip(uni["ticker"], uni["name"])]}, ttl=3600)
+    tk, nm, ex, listed, src = memo(("universe", int(sme), float(min_val), float(min_px)), 3600, build)
+    return reply({"source": src, "count": len(tk), "listed": listed, "rows": [[a, b, c] for a, b, c in zip(tk, nm, ex)]}, ttl=1800)
 
 
 @router.get("/market/scan")
@@ -104,13 +115,67 @@ def run_finder(tickers: list[str], hz: int, target: float, mode: str, fixed: flo
     return out, act, ml, ml_err, base, pdx, dfs, cut
 
 
-GRADE_COLS = [col("Stock", "Stock"), col("Grade", "Grade", "grade"),
-              col("P(target first)", "P(target)", "bar01"), col("P(stop first)", "P(stop)", "pct0"),
-              col("P(touch target)", "P(touch)", "pct0", help="Touches the target at any point, ignoring the stop"),
-              col("Exp. return", "Exp. return", "spct2", help="Per trade, after ~0.3% costs"),
+GRADE_COLS = [col("Stock", "Stock"), col("P(touch target)", "Chance to reach target", "bar01",
+                                          help="Probability the price touches the target at any point in the window (no stop). "
+                                               "Driven mostly by how volatile the stock is."),
+              col("P(target first)", "Target before stop", "pct0", help="Reaches the target before hitting the stop"),
+              col("P(stop first)", "Stop hit first", "pct0"),
+              col("Exp. return", "Avg return / trade", "spct2",
+                  help="Average result per trade after stop-outs and ~0.3% costs. Much smaller than the target on purpose."),
+              col("Grade", "Grade", "grade"),
+              col("Tech", "Technical", "n0", help="JINNI technical score 0-100 (trend, momentum, timing, volume, risk)"),
+              col("Quality", "Fundamentals", "n0", help="0-100 from ROE, debt, margins, growth, P/E; blank if unavailable"),
+              col("News", "News tone", "tone", help="Recent headline tone for this stock, -1 to +1"),
+              col("Flags", "Watch-outs"),
               col("Price", "Price", "inr2"), col("Target ₹", "Target ₹", "inr2"), col("Stop ₹", "Stop ₹", "inr2"),
               col("Stop %", "Stop %", "pct1"), col("Typical days", "Days", "n0", help="Median days to target when hit"),
               col("Verdict", "Verdict"), col("Setups", "Setups")]
+
+
+def _enrich(tbl: pd.DataFrame, dfs: dict, bench, top: int = 25) -> pd.DataFrame:
+    """Technical score for every analysed stock; fundamentals and news tone for the best ``top`` (network calls)."""
+    tech = {}
+    for t in tbl["ticker"]:
+        try:
+            tech[t] = float(signals.factor_scores(dfs[t], bench)["Composite"].iloc[-1])
+        except Exception:  # noqa: BLE001
+            tech[t] = np.nan
+    tbl = tbl.assign(Tech=tbl["ticker"].map(tech))
+    best = tbl.sort_values("P(touch target)", ascending=False).head(top)["ticker"].tolist()
+
+    def one(t):
+        info = memo(("info", t), 3600, lambda: jdata.fetch_info(t))
+        q = signals.fundamental_score(info)[0]
+        n = memo(("news", t), 600, lambda: jevents.headlines(t, limit=12))
+        tn = sm_score(n)
+        return t, q, tn
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        got = list(ex.map(one, best))
+    qd = {t: q for t, q, _ in got}
+    nd = {t: n for t, _, n in got}
+    tbl = tbl.assign(Quality=tbl["ticker"].map(qd), News=tbl["ticker"].map(nd))
+    rsi_ = {t: float(__import__("jinni.indicators", fromlist=["rsi"]).rsi(dfs[t]["Close"]).iloc[-1]) for t in tbl["ticker"]}
+    flags = []
+    for r in tbl.itertuples():
+        f = []
+        if r.Quality is not None and np.isfinite(r.Quality) and r.Quality < 35:
+            f.append("weak fundamentals")
+        if r.News is not None and np.isfinite(r.News) and r.News < -0.25:
+            f.append("negative news")
+        if rsi_.get(r.ticker, 50) > 75:
+            f.append("overbought")
+        if r._asdict().get("Tech") is not None and np.isfinite(r.Tech) and r.Tech < 30:
+            f.append("weak trend")
+        flags.append(", ".join(f))
+    return tbl.assign(Flags=flags)
+
+
+def sm_score(news: pd.DataFrame) -> float:
+    from jinni import sentiment as sm
+
+    s = sm.score_news(news)
+    return s["score"]
 
 
 @router.get("/finder")
@@ -133,7 +198,8 @@ def finder(target: float = Query(0.05, ge=0.005, le=1), hz: int = Query(21, ge=2
                      "Typical days": f.days_to_target, "Verdict": f.verdict, "Setups": ", ".join(act.get(t, [])),
                      "Sector": sector_of(t), "as_of": f.as_of, "engines": f.engines, "p_target": f.p_target,
                      "notes": f.notes})
-    tbl = pd.DataFrame(rows).sort_values("Exp. return", ascending=False)
+    tbl = pd.DataFrame(rows).sort_values("P(touch target)", ascending=False)
+    tbl = _enrich(tbl, dfs, base_bench(pdx))
     gc = tbl["Grade"].value_counts()
     hz_label = next((k for k, v in fc.HORIZONS.items() if v == hz), f"{hz} days")
     stop_txt = "auto stop" if mode == "auto" else f"−{fixed:.1%} stop" if fixed else "no stop"
@@ -142,15 +208,23 @@ def finder(target: float = Query(0.05, ge=0.005, le=1), hz: int = Query(21, ge=2
         blocks.append(callout("warn", f"Stopped early to stay within the time limit: {len(res)} of {len(dfs)} stocks "
                                       "analysed. Try fewer stocks."))
     blocks.append(text(f"#### Goal: **+{target:.0%} within {hz_label}** · {stop_txt}"))
-    best = tbl.loc[tbl["P(target first)"].idxmax()]
+    best = tbl.loc[tbl["P(touch target)"].idxmax()]
+    likely = int((tbl["P(touch target)"] >= 0.5).sum())
     blocks.append(kpis([
         ("Stocks analysed", f"{len(tbl)}", f"{len(tk) - len(tbl)} skipped" if len(tk) > len(tbl) else ""),
-        ("Grade A / B", f"{gc.get('A', 0)} / {gc.get('B', 0)}", "positive expected value", "up"),
-        ("Grade C / D", f"{gc.get('C', 0)} / {gc.get('D', 0)}", "break-even or worse", "down"),
-        ("Best odds", pct(best["P(target first)"], 0), best["Stock"]),
+        (f"Likely to reach +{target:.0%}", f"{likely}", "≥ 50% chance within the window", "up" if likely else None),
+        ("Best chance", pct(best["P(touch target)"], 0), best["Stock"]),
         ("Typical stock", pct(base, 0), "historical hit rate for this goal"),
+        ("Grade A / B", f"{gc.get('A', 0)} / {gc.get('B', 0)}", "positive average return per trade after stops", "up"),
         ("ML engine", f"AUC {mlr.auc:.2f}" if mlr else "off",
          (f"weight {mlr.weight:.0%}" if mlr.weight > 0 else "no skill → 0 weight") if mlr else (ml_err or ""))]))
+    blocks.append(callout("info", "**How to read this.** "Chance to reach target" is how often the price touches the goal inside the "
+                                  "window; it rises with volatility, so the top of the list is the most active stocks. "
+                                  ""Target before stop" and "Avg return / trade" are lower because stops get hit and costs apply: "
+                                  "an average of well under 1% per trade is normal even when the chance of touching +5% is above 50%. "
+                                  "In a walk-forward test on real NSE stocks, the probability engine's rankings were useful "
+                                  "(AUC about 0.6 to 0.7) while technical scores and momentum added nothing, so they are shown as "
+                                  "watch-outs, not used to rank. See Lab → System accuracy."))
     blocks.append(table(tbl, GRADE_COLS, select={"key": "ticker", "action": "detail"},
                         height=min(560, 44 + 38 * len(tbl))))
 
@@ -384,3 +458,7 @@ def trade_plan_blocks(req: DetailReq, c, f, stop, p_t, grade, verdict, t):
              "p_stop": f.p_stop, "grade": grade, "verdict": verdict, "qty": sz.qty, "entry_date": f.as_of,
              "source": "plan", "allowed": g.status != "BLOCK"}
     return out, track
+
+
+def base_bench(pdx):
+    return pdx.close[BENCHMARK].dropna() if BENCHMARK in pdx.close else None
