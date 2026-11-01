@@ -201,3 +201,72 @@ def sentiment_live():
                         "Status": "ok" if v != "unreachable" else "unreachable"} for k, v in status.items()])
     blocks.append(table(st, [col("Source", "Source"), col("Headlines", "Headlines", "int"), col("Status", "Status", "badge")]))
     return reply(doc(blocks, "live", tone=t["tone"]), ttl=300)
+
+
+# ------------------------------------------------------------------ accuracy
+
+
+@router.get("/accuracy")
+def accuracy(target: float = Query(0.05, ge=0.01, le=0.3), h: int = Query(21, ge=3, le=63), n: int = Query(20, ge=8, le=40)):
+    """Walk-forward accuracy of 'chance of reaching +target within h days' on live data for the largest NIFTY stocks."""
+    from jinni import accuracy as ac
+    from jinni.universe import NIFTY50
+
+    from .core import nifty50
+
+    tk = nifty50()[:n]
+
+    def build():
+        pdx = prices(tk + [BENCHMARK], "5y", ttl=3600)
+        dfs = {t: pdx.ohlcv(t) for t in tk if t in pdx.close and pdx.close[t].notna().sum() > 500}
+        bench = pdx.close[BENCHMARK].dropna()
+        return ac.collect(dfs, bench, target, h, step=10, n_paths=400), pdx.source
+
+    s, source = memo(("accuracy", tuple(tk), target, h), 6 * 3600, build)
+    if s.empty:
+        raise ApiError(422, "Not enough price history to measure accuracy.")
+    sm_ = ac.summary(s)
+    cal = ac.calibration(s["p_sim"], s["hit"])
+    sig = ac.signal_table(s)
+    blocks = source_notice(source)
+    blocks.append(callout("info", f"**Walk-forward test.** For {sm_['stocks']} stocks, every 10th day from {sm_['from']:%b %Y} to "
+                                  f"{sm_['to']:%b %Y} ({sm_['n']:,} predictions) the model saw only the past, stated the chance of "
+                                  f"touching +{target:.0%} within {h} trading days, and we then checked what happened."))
+    skill = sm_["brier_base"] - sm_["brier_sim"]
+    blocks.append(kpis([
+        ("Real hit rate", pct(sm_["base"], 0), f"of all predictions reached +{target:.0%}"),
+        ("Model's average", pct(sm_["mean_pred"], 0), "average stated chance"),
+        ("Ranking skill (AUC)", f"{sm_['auc_sim']:.2f}", "0.50 = no skill, 1.00 = perfect", "up" if sm_["auc_sim"] >= 0.58 else None),
+        ("Calibration error (Brier)", f"{sm_['brier_sim']:.3f}", f"vs {sm_['brier_base']:.3f} for always saying {sm_['base']:.0%}",
+         "up" if skill > 0 else "down")]))
+    blocks.append(kpis([
+        ("Avg result per trade", pct(sm_["ret_all"], 2, True), f"+{target:.0%} target, auto stop, after 0.3% costs", tone(sm_["ret_all"])),
+        ("Best-ranked fifth", pct(sm_["ret_top"], 2, True), f"{pct(sm_['hit_top'], 0)} reached the target", tone(sm_["ret_top"]))]))
+    f = figs.fig([{"type": "scatter", "mode": "markers+lines", "x": cal["Predicted"].tolist(), "y": cal["Actual"].tolist(),
+                   "name": "Model", "marker": {"size": 10, "color": figs.GOLD}, "line": {"color": figs.GOLD}},
+                  {"type": "scatter", "mode": "lines", "x": [0, 1], "y": [0, 1], "name": "Perfect", "line": {"color": figs.MUTED, "dash": "dot"}}],
+                 {"title": "When the model says X%, how often did it happen?", "xaxis": {"title": "Stated chance", "tickformat": ".0%"},
+                  "yaxis": {"title": "What actually happened", "tickformat": ".0%"}})
+    blocks.append(plot(f, 340))
+    blocks.append(table(cal, [col("Samples", "Predictions", "int"), col("Predicted", "Stated chance", "pct0"), col("Actual", "Actually reached", "pct0")]))
+    blocks.append(section("Which signals can rank stocks that reach the target?"))
+    blocks.append(table(sig, [col("Signal", "Signal"), col("AUC", "AUC", "n3"), col("Top 20% hit", "Top 20% hit rate", "pct0"),
+                              col("Bottom 20% hit", "Bottom 20% hit rate", "pct0"), col("Base rate", "Base rate", "pct0"),
+                              col("Samples", "Samples", "int")]))
+    tech = sig[sig["Signal"] == "Technical score"]
+    vol = sig[sig["Signal"] == "Volatility"]
+    lines = []
+    if len(vol):
+        lines.append(f"- **Volatility does the heavy lifting**: ranking by volatility alone gives AUC {vol['AUC'].iloc[0]:.2f}. "
+                     "Stocks that move more reach any target more often, and they also hit stops more often.")
+    if len(tech):
+        a = tech["AUC"].iloc[0]
+        lines.append(f"- **Technical score**: AUC {a:.2f}. " + ("No usable ranking power on this sample, so JINNI does not use it to rank, only to flag." if a < 0.54
+                     else "Some ranking power."))
+    lines.append("- **Sentiment and fundamentals** have no free point-in-time history, so they cannot be back-tested here. They are "
+                 "shown as watch-outs and, for the outlook, as a capped tilt.")
+    blocks.append(text("\n".join(lines)))
+    blocks.append(caption("Limits: large, liquid NIFTY stocks only; windows overlap, so the effective sample is smaller than the count; "
+                          "survivorship bias (today's index members); 'reached' means the day's high touched the level. Past accuracy "
+                          "does not guarantee future accuracy."))
+    return reply(doc(blocks, source, auc=sm_["auc_sim"], base=sm_["base"]), ttl=1800)

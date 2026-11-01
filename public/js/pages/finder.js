@@ -29,7 +29,7 @@ export async function render(view) {
   const stop = Segmented({ label: 'Stop-loss', options: [['auto', 'Auto'], ['fixed', 'Fixed %'], ['none', 'None']], value: last.stop || 'auto',
     help: 'Auto: volatility-based (at least 1×ATR), no wider than target ÷ 1.5. None: just the odds of touching the target.' });
   const stopF = NumberInput({ label: 'Stop (%)', value: last.stopF || 3, min: 0.5, max: 50, step: 0.5 });
-  const universe = Select({ label: 'Search in', value: last.universe || 'nifty50', options: [['market', 'Entire NSE market (all listed stocks)'], ['nifty50', 'NIFTY 50'],
+  const universe = Select({ label: 'Search in', value: last.universe || 'nifty50', options: [['market', 'All listed stocks (NSE + BSE)'], ['nifty50', 'NIFTY 50'],
     ['holdings', 'My holdings'], ['watchlist', 'My watchlist'], ['custom', 'Custom list']] });
   const custom = TextInput({ label: 'Symbols', value: last.custom || '', placeholder: 'e.g. IRCTC, HAL, TRENT', help: 'Comma separated NSE symbols, up to 70.' });
   const budget = NumberInput({ label: 'My budget (₹, 0 = no limit)', value: last.budget ?? 0, min: 0, step: 500, help: 'Only stocks you can afford at least one share of are considered, and JINNI builds a whole-share plan.' });
@@ -66,7 +66,7 @@ export async function render(view) {
 
   async function marketScan(p) {
     res.loading('Scanning the entire NSE market…', 'Loading the stock list');
-    const uni = await get('/market/universe', { sme: sme.get() ? 1 : 0 });
+    const uni = await get('/market/universe', { sme: sme.get() ? 1 : 0, min_val: minVal.get() || 1, min_px: minPx.get() || 20 });
     let tickers = uni.rows.map((r) => r[0]);
     if (uploaded?.length) tickers = uploaded.map((x) => (x.includes('.') ? x : `${x}.NS`));
     const chunks = []; for (let i = 0; i < tickers.length; i += CHUNK) chunks.push(tickers.slice(i, i + CHUNK));
@@ -86,7 +86,7 @@ export async function render(view) {
     const ok = rows.filter((r) => !r.why).sort((a, b) => b.q - a.q);
     const reasons = {}; rows.filter((r) => r.why).forEach((r) => r.why.split('; ').forEach((w) => { reasons[w] = (reasons[w] || 0) + 1; }));
     const top = ok.slice(0, deepN.get()).map((r) => r.t);
-    state.funnel = { listed: uni.count, source: uni.source, scanned: rows.length, passed: ok.length, deep: top.length, reasons, failed: failed * CHUNK };
+    state.funnel = { listed: uni.listed || uni.count, source: uni.source, scanned: rows.length, passed: ok.length, deep: top.length, reasons, failed: failed * CHUNK };
     if (!top.length) throw new Error('No stock passed the filters. Try a bigger budget, a lower liquidity filter or a longer window.');
     return top;
   }

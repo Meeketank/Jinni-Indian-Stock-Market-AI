@@ -63,8 +63,13 @@ def normalize_symbol(raw: str) -> str:
     return f"{base}.NS"
 
 
+NAME_HINTS: dict[str, str] = {}  # ticker -> company name, filled from the exchanges' files (BSE scrip codes are numeric)
+
+
 def display_name(symbol: str) -> str:
     """Short label for charts and tables."""
+    if symbol in NAME_HINTS:
+        return NAME_HINTS[symbol] + (" (BSE)" if symbol.endswith(".BO") else "")
     if symbol in INDICES:
         return INDICES[symbol]
     if symbol in SECTOR_INDICES:

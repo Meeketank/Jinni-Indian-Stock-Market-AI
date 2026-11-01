@@ -8,7 +8,7 @@ export async function render(view) {
   view.append(pageHead('Optimizer', 'Build portfolios for best risk-adjusted return, lowest volatility or equal risk, with caps per stock and sector.'));
   const s = store.settings();
   const src = Segmented({ label: 'Universe', options: [['holdings', 'My holdings'], ['nifty50', 'NIFTY 50'], ['custom', 'Custom']], value: 'holdings' });
-  const custom = TextInput({ label: 'Symbols', value: 'RELIANCE, HDFCBANK, INFY, ITC, LT, SUNPHARMA, TITAN, NTPC, BHARTIARTL', help: 'Comma separated, 2–60.' });
+  const custom = TextInput({ label: 'Symbols', value: '', placeholder: 'e.g. TCS, ITC, LT', help: 'Comma separated, 2–60.' });
   const obj = Select({ label: 'Objective', options: Object.entries(cat.objectives), value: 'max_sharpe' });
   const mu = Select({ label: 'Expected returns', options: [['capm', 'CAPM equilibrium (beta × 7% ERP)'], ['shrunk', 'Historical, shrunk 50% to the mean'], ['historical', 'Historical (noisy)']], value: 'capm' });
   const maxW = Slider({ label: 'Max weight per stock', min: 5, max: 100, value: 25, fmt: (v) => `${v}%` });

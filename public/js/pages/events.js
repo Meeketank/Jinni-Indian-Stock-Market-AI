@@ -27,7 +27,7 @@ export async function render(view) {
       const nth = Select({ label: 'Which', options: ['1st', '2nd', '3rd', '4th', 'Last', 'Every'], value: '2nd' });
       const day = Select({ label: 'Day', options: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'], value: 'Friday' });
       const ev = Select({ label: 'Event', options: cat.events, value: cat.events[0], help: 'Built-in dates cover recent years; please verify any you rely on.' });
-      const dates = TextArea({ label: 'Dates (YYYY-MM-DD, one per line or comma separated)', value: '2025-04-02\n2025-04-09\n2025-07-07\n2025-08-06', rows: 4, cls: 'full' });
+      const dates = TextArea({ label: 'Dates (YYYY-MM-DD, one per line or comma separated)', value: '', placeholder: 'e.g. 2025-04-02', rows: 4, cls: 'full' });
       const off = Segmented({ label: 'Reaction measured on', options: [['0', 'Same session'], ['1', 'Next session (event after 3:30 pm IST)']], value: '1' });
       const win = Slider({ label: 'Window around the event (trading days)', min: 1, max: 15, value: 5 });
       const sync = () => { const m = mode.get(); showIf(nth, () => m === 'rule'); showIf(day, () => m === 'rule'); showIf(ev, () => m === 'builtin'); showIf(dates, () => m === 'dates'); showIf(off, () => m === 'dates'); };

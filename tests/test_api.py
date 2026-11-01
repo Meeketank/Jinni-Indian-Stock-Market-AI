@@ -542,3 +542,73 @@ def test_select_endpoint_builds_a_basket_within_budget(client, profile):
 
 def test_select_rejects_unknown_profile(client):
     assert client.get("/api/select?profile=yolo").status_code == 422
+
+
+# --------------------------------------------------- all-stocks (NSE + BSE) and accuracy
+
+
+def test_bhavcopy_parsing_and_cross_listing_merge():
+    from jinni import bhav
+
+    bse = bhav.parse_bse((ROOT / "tests" / "fixtures" / "bse_bhavcopy_sample.csv").read_text())
+    assert len(bse) > 80 and set(bse["exch"]) == {"BSE"} and bse["ticker"].str.endswith(".BO").all()
+    assert (bse["isin"].str.startswith("INE")).all() and (bse[["close", "prev"]] > 0).all().all()
+    # NSE file in NSE's real column layout (leading spaces, lakh turnover, dd-Mon-yyyy dates)
+    isin = dict(zip(bse["symbol"], bse["isin"]))
+    nse_txt = ("SYMBOL, SERIES, DATE1, PREV_CLOSE, OPEN_PRICE, HIGH_PRICE, LOW_PRICE, LAST_PRICE, CLOSE_PRICE, AVG_PRICE, TTL_TRD_QNTY, "
+               "TURNOVER_LACS, NO_OF_TRADES, DELIV_QTY, DELIV_PER\n"
+               "TCS, EQ, 30-Oct-2026, 2480.50, 2490.00, 2510.00, 2470.00, 2495.00, 2496.00, 2490.00, 200000, 4902.09, 5000, 100000, 50.0\n"
+               "ONLYNSE, EQ, 30-Oct-2026, 100.00, 101.00, 106.00, 100.00, 105.00, 105.00, 103.00, 90000, 100.00, 900, 40000, 44.0\n"
+               "ETFX, N1, 30-Oct-2026, 50.00, 50.00, 51.00, 49.00, 50.00, 50.00, 50.00, 10, 1.00, 5, 5, 50.0\n")
+    nse = bhav.parse_nse(nse_txt, {"TCS": isin["TCS"]})
+    assert list(nse["ticker"]) == ["TCS.NS", "ONLYNSE.NS"]                       # non-equity series dropped
+    assert nse.loc[0, "turnover"] == pytest.approx(4902.09e5) and nse.loc[0, "date"] == pd.Timestamp("2026-10-30")
+    both = bhav.merge(nse, bse)
+    assert (both["ticker"] == "TCS.NS").sum() == 1 and "TCS" not in set(both.loc[both["exch"] == "BSE", "symbol"])
+    assert "ONLYNSE.NS" in set(both["ticker"]) and (both["exch"] == "BSE").sum() > 50  # BSE-only names kept
+    assert both.loc[both["ticker"] == "TCS.NS", "name"].iloc[0].lower().startswith("tata consultancy")  # name from BSE file
+
+
+def test_movers_cover_all_stocks_on_both_exchanges(client):
+    body = client.get("/api/home/movers?min_cr=0").json()
+    text_ = json.dumps(body)
+    assert "Top gainers" in text_ and "Top losers" in text_ and "Most active" in text_ and "(BSE)" in text_
+    tabs_ = [b for b in body["blocks"] if b["type"] == "tabs"][0]["tabs"]
+    gain = [b for b in tabs_[0]["blocks"] if b["type"] == "table"][0]["rows"]
+    assert [r["chg"] for r in gain] == sorted((r["chg"] for r in gain), reverse=True) and len(gain) == 20
+
+
+def test_movers_say_so_when_nothing_is_reachable(client, monkeypatch):
+    from jinni import bhav, live
+    from server import core
+
+    core._MEMO.clear()
+    monkeypatch.setattr(bhav, "latest", lambda *a, **k: (pd.DataFrame(columns=bhav.COLS), {"error": "x"}))
+    monkeypatch.setattr(live, "board", lambda *a, **k: None)
+    r = client.get("/api/home/movers")
+    assert r.status_code == 200 and "will not guess" in r.text
+    core._MEMO.clear()
+
+
+def test_finder_ranks_by_chance_of_reaching_the_target(client):
+    tk = ",".join(t + ".NS" for t in ["TCS", "INFY", "ITC", "LT", "SBIN", "TATASTEEL"])
+    body = client.get(f"/api/finder?target=0.05&hz=21&tickers={tk}&ml=0").json()
+    tb = [b for b in walk_blocks(body["blocks"]) if b["type"] == "table"][0]
+    ps = [r["P(touch target)"] for r in tb["rows"]]
+    assert ps == sorted(ps, reverse=True)
+    assert {"Tech", "Quality", "News", "Flags"} <= {c["key"] for c in tb["columns"]}
+    assert "How to read this" in json.dumps(body) and "Likely to reach" in json.dumps(body)
+
+
+def test_accuracy_walk_forward_is_calibrated_enough_on_synthetic_data(client):
+    r = client.get("/api/accuracy?target=0.05&h=21&n=12")
+    assert r.status_code == 200, r.text[:300]
+    body = strict_json(r.text)
+    text_ = json.dumps(body)
+    assert "Walk-forward test" in text_ and "Which signals can rank" in text_ and "Sentiment and fundamentals" in text_
+    assert 0.4 < body["data"]["auc"] < 0.9 and 0 < body["data"]["base"] < 1
+
+
+def test_universe_route_reports_listed_and_filtered(client):
+    u = client.get("/api/market/universe").json()
+    assert u["listed"] >= u["count"] > 100 and len(u["rows"][0]) == 3
