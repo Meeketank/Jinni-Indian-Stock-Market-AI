@@ -132,7 +132,7 @@ GRADE_COLS = [col("Stock", "Stock"), col("P(touch target)", "Chance to reach tar
               col("Verdict", "Verdict"), col("Setups", "Setups")]
 
 
-def _enrich(tbl: pd.DataFrame, dfs: dict, bench, top: int = 25) -> pd.DataFrame:
+def _enrich(tbl: pd.DataFrame, dfs: dict, bench, top: int = 15, budget_s: float = 9.0) -> pd.DataFrame:
     """Technical score for every analysed stock; fundamentals and news tone for the best ``top`` (network calls)."""
     tech = {}
     for t in tbl["ticker"]:
@@ -150,8 +150,19 @@ def _enrich(tbl: pd.DataFrame, dfs: dict, bench, top: int = 25) -> pd.DataFrame:
         tn = sm_score(n)
         return t, q, tn
 
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        got = list(ex.map(one, best))
+    # Fundamentals and news are network calls: give them a fixed time budget and leave blanks rather than overrun.
+    from concurrent.futures import wait
+
+    ex = ThreadPoolExecutor(max_workers=10)
+    futs = [ex.submit(one, t) for t in best]
+    done, _ = wait(futs, timeout=budget_s)
+    ex.shutdown(wait=False, cancel_futures=True)
+    got = []
+    for f in done:
+        try:
+            got.append(f.result())
+        except Exception:  # noqa: BLE001
+            pass
     qd = {t: q for t, q, _ in got}
     nd = {t: n for t, _, n in got}
     tbl = tbl.assign(Quality=tbl["ticker"].map(qd), News=tbl["ticker"].map(nd))
@@ -182,6 +193,9 @@ def sm_score(news: pd.DataFrame) -> float:
 def finder(target: float = Query(0.05, ge=0.005, le=1), hz: int = Query(21, ge=2, le=250), stop: str = "auto",
            tickers: str = Query(..., max_length=2500), ml: int = 1, budget: float = Query(0, ge=0),
            max_names: int = Query(3, ge=1, le=5)):
+    from jinni import bhav
+
+    memo(("bhav",), 900, bhav.latest)  # fills company names for BSE scrip codes
     tk = [normalize_symbol(x) for x in tickers.replace(" ", ",").split(",") if x.strip()]
     tk = list(dict.fromkeys(tk))[:70]
     if not tk:
@@ -218,9 +232,9 @@ def finder(target: float = Query(0.05, ge=0.005, le=1), hz: int = Query(21, ge=2
         ("Grade A / B", f"{gc.get('A', 0)} / {gc.get('B', 0)}", "positive average return per trade after stops", "up"),
         ("ML engine", f"AUC {mlr.auc:.2f}" if mlr else "off",
          (f"weight {mlr.weight:.0%}" if mlr.weight > 0 else "no skill → 0 weight") if mlr else (ml_err or ""))]))
-    blocks.append(callout("info", "**How to read this.** "Chance to reach target" is how often the price touches the goal inside the "
+    blocks.append(callout("info", "**How to read this.** “Chance to reach target” is how often the price touches the goal inside the "
                                   "window; it rises with volatility, so the top of the list is the most active stocks. "
-                                  ""Target before stop" and "Avg return / trade" are lower because stops get hit and costs apply: "
+                                  "“Target before stop” and “Avg return / trade” are lower because stops get hit and costs apply: "
                                   "an average of well under 1% per trade is normal even when the chance of touching +5% is above 50%. "
                                   "In a walk-forward test on real NSE stocks, the probability engine's rankings were useful "
                                   "(AUC about 0.6 to 0.7) while technical scores and momentum added nothing, so they are shown as "

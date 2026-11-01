@@ -107,6 +107,15 @@ def _fixture() -> pd.DataFrame:
 
 
 def latest(max_back: int = 7) -> tuple[pd.DataFrame, dict]:
+    out, info = _latest(max_back)
+    if len(out):
+        from .universe import NAME_HINTS
+
+        NAME_HINTS.update(dict(zip(out["ticker"], out["name"])))
+    return out, info
+
+
+def _latest(max_back: int = 7) -> tuple[pd.DataFrame, dict]:
     """(all listed stocks with the latest EOD prices, info). Empty frame + info['error'] if nothing is reachable."""
     if demo_forced():
         return _fixture(), {"source": "test fixture", "date": None}
