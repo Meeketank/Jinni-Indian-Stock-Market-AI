@@ -747,3 +747,39 @@ def test_forecast_ranges_are_calibrated_on_synthetic_data():
     px = jd.get_prices(["TCS.NS", "INFY.NS", "ITC.NS"], "5y")
     cov = ac.range_coverage({t: px.ohlcv(t) for t in px.tickers}, 21, step=20, n_paths=300)
     assert cov["n"] > 80 and 0.8 <= cov["in90"] <= 0.97 and 0.38 <= cov["in50"] <= 0.62
+
+
+def test_names_are_never_copied_through_an_empty_isin():
+    """Regression (seen live): BSE rows from Yahoo have no ISIN; an empty ISIN matched every NSE row without one
+    and stamped the first BSE company's name on unrelated stocks."""
+    from jinni import bhav
+
+    mk = lambda t, sym, name, ex, isin: {"ticker": t, "symbol": sym, "name": name, "exch": ex, "isin": isin, "series": "", "open": 1.0,  # noqa: E731
+                                         "high": 1.0, "low": 1.0, "close": 10.0, "prev": 9.0, "volume": 1.0, "turnover": 1.0,
+                                         "date": pd.Timestamp("2026-11-10")}
+    nse = pd.DataFrame([mk("KKJEWELS.NS", "KKJEWELS", "KKJEWELS", "NSE", ""), mk("TCS.NS", "TCS", "TCS", "NSE", "INE467B01029"),
+                        mk("INFY.NS", "INFY", "INFY", "NSE", "")])
+    bse = pd.DataFrame([mk("RELIANCE.BO", "RELIANCE", "Reliance Industries Limited", "BSE", ""),
+                        mk("INFY.BO", "INFY", "Infosys Limited", "BSE", ""), mk("532540.BO", "TCS", "Tata Consultancy Services", "BSE", "INE467B01029")])
+    out = bhav.merge(nse, bse).set_index("ticker")
+    assert out.loc["KKJEWELS.NS", "name"] == "KKJEWELS"                       # unknown stays its own symbol
+    assert out.loc["INFY.NS", "name"] == "Infosys Limited"                    # matched by symbol
+    assert out.loc["TCS.NS", "name"] == "Tata Consultancy Services"           # matched by ISIN
+    assert "INFY.BO" not in out.index and "532540.BO" not in out.index and "RELIANCE.BO" in out.index
+
+
+def test_movers_use_live_quotes_for_both_exchanges_on_a_trading_day(monkeypatch):
+    from jinni import bhav, live
+
+    def fake(exchange, **k):
+        suf = ".NS" if exchange == "NSI" else ".BO"
+        return pd.DataFrame([{"ticker": f"S{i}{suf}", "symbol": f"S{i}" if exchange == "NSI" else f"B{i}", "name": f"Co {i}", "exch": "NSE" if exchange == "NSI" else "BSE",
+                              "isin": "", "series": "", "open": 1.0, "high": 1.0, "low": 1.0, "close": 10.0 + i, "prev": 10.0, "volume": 5.0,
+                              "turnover": 50.0, "date": pd.Timestamp.today().normalize()} for i in range(600)])
+
+    monkeypatch.setattr(live, "exchange_quotes", fake)
+    monkeypatch.setattr(bhav, "demo_forced", lambda: False)
+    got = bhav.live_now()
+    assert got is not None and got[1]["live"] and len(got[0]) == 1200 and set(got[0]["exch"]) == {"NSE", "BSE"}
+    monkeypatch.setattr(live, "exchange_quotes", lambda *a, **k: None)
+    assert bhav.live_now() is None                                            # falls back to the official files

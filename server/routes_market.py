@@ -290,7 +290,7 @@ def home_movers(min_cr: float = Query(1.0, ge=0, le=100)):
     traded less than ``min_cr`` crore rupees are left out so a handful of shares cannot top the list."""
     from jinni import bhav
 
-    df, info = memo(("bhav",), 900, bhav.latest)
+    df, info = memo(("bhav-live",), 240, lambda: bhav.latest(prefer_live=True))
     blocks = []
     if df.empty:
         # Last resort: Yahoo's live screener (NSE + BSE) when the exchange files cannot be fetched.
@@ -314,6 +314,7 @@ def home_movers(min_cr: float = Query(1.0, ge=0, le=100)):
     sel = {"key": "ticker", "action": "analyze"}
     cols_ = ["ticker", "Stock", "exch", "close", "chg", "Cap", "volume"]
     when = f"{info['date']:%d %b %Y}" if info.get("date") else "latest"
+    live_ = bool(info.get("live"))
     blocks.append(tabs([
         ("Top gainers", [table(d.nlargest(20, "chg")[cols_], cc, select=sel)]),
         ("Top losers", [table(d.nsmallest(20, "chg")[cols_], cc, select=sel)]),
@@ -321,10 +322,11 @@ def home_movers(min_cr: float = Query(1.0, ge=0, le=100)):
     adv, dec = int((d["chg"] > 0).sum()), int((d["chg"] < 0).sum())
     blocks.append(kpis([("Stocks covered", f"{len(df):,}", f"{(df['exch'] == 'NSE').sum():,} NSE · {(df['exch'] == 'BSE').sum():,} BSE-only"),
                         ("Advancing / declining", f"{adv:,} / {dec:,}", f"stocks trading ≥ ₹{min_cr:g} cr", "up" if adv >= dec else "down"),
-                        ("Data", when, info.get("source", ""))]))
-    blocks.append(caption(f"All NSE and BSE listings from the exchanges' official end-of-day files, {when} close. Cross-listed "
-                          "companies appear once (NSE). BSE-only stocks are marked (BSE). Tap a row to analyse it."))
-    return reply(doc(blocks, "live"), ttl=300)
+                        ("Data", "Live" if live_ else when, info.get("source", ""))]))
+    blocks.append(caption((f"Live quotes for every NSE and BSE listing ({when}, delayed a few minutes; turnover is today so far). "
+                           if live_ else f"All NSE and BSE listings, {when} close ({info.get('source', '')}). ")
+                          + "Cross-listed companies appear once (NSE). BSE-only stocks are marked (BSE). Tap a row to analyse it."))
+    return reply(doc(blocks, "live"), ttl=120 if live_ else 300)
 
 
 @router.get("/home/nifty50")

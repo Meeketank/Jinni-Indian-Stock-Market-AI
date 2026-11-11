@@ -151,7 +151,7 @@ def select(budget: float = Query(100000, ge=1000), k: int = Query(8, ge=3, le=20
 
     blocks.append(section("Which signals have actually worked (and how they are weighted)"))
     ft = v.factor_table
-    blocks.append(table(ft, [col("Factor", "Factor"), col("Mean IC", "Mean IC", "n3"), col("t-stat", "t-stat", "n1"),
+    blocks.append(table(ft, [col("Factor", "Factor"), col("Recent IC", "IC, last 2 yrs (sets the weight)", "n3"), col("Mean IC", "IC, all history", "n3"), col("t-stat", "t-stat", "n1"),
                              col("Worked %", "Worked %", "pct0"), col("Weight now", "Weight now", "pct0"),
                              col("What it measures", "What it measures")]))
     if v.weights_now.sum() == 0:
