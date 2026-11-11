@@ -44,13 +44,19 @@ def _get(url: str, referer: str) -> str | None:
         return None
 
 
+def nice_name(n: str) -> str:
+    """Title-case only names that arrive in ALL CAPS, so "ICICI Bank Limited" is not turned into "Icici Bank Limited"."""
+    n = str(n).strip()
+    return n.title() if n.isupper() else n
+
+
 def parse_bse(text: str) -> pd.DataFrame:
     d = pd.read_csv(io.StringIO(text), dtype=str)
     d.columns = [c.strip() for c in d.columns]
     d = d[(d["FinInstrmTp"] == "STK") & d["SctySrs"].isin(BSE_EQUITY_SERIES) & d["ISIN"].str.startswith("INE", na=False)]
     num = lambda c: pd.to_numeric(d[c], errors="coerce")  # noqa: E731
     out = pd.DataFrame({
-        "ticker": d["FinInstrmId"].str.strip() + ".BO", "symbol": d["TckrSymb"].str.strip(), "name": d["FinInstrmNm"].str.strip().str.title(),
+        "ticker": d["FinInstrmId"].str.strip() + ".BO", "symbol": d["TckrSymb"].str.strip(), "name": d["FinInstrmNm"].map(nice_name),
         "exch": "BSE", "isin": d["ISIN"].str.strip(), "series": d["SctySrs"], "open": num("OpnPric"), "high": num("HghPric"),
         "low": num("LwPric"), "close": num("ClsPric"), "prev": num("PrvsClsgPric"), "volume": num("TtlTradgVol"),
         "turnover": num("TtlTrfVal"), "date": pd.to_datetime(d["TradDt"])})
@@ -105,7 +111,7 @@ def _isin_map() -> dict[str, str]:
         from . import market
 
         u = market.nse_universe()
-        _NSE_NAMES.update(dict(zip(u["symbol"], u["name"].astype(str).str.title())))
+        _NSE_NAMES.update(dict(zip(u["symbol"], u["name"].map(nice_name))))
         return dict(zip(u["symbol"], u["isin"]))
     except Exception:  # noqa: BLE001
         return {}

@@ -99,6 +99,11 @@ def universe(max_pages: int = 14) -> pd.DataFrame | None:
     return pd.DataFrame(rows) if rows else None
 
 
+def _nice(n: str) -> str:
+    n = str(n).strip()
+    return n.title() if n.isupper() else n
+
+
 def exchange_quotes(exchange: str = "BSE", max_pages: int = 20, workers: int = 6) -> pd.DataFrame | None:
     """Latest quote for every stock Yahoo lists on an exchange ("NSI" or "BSE"), fetched 250 at a time in parallel.
     Used when the exchange's own end-of-day file cannot be downloaded. None if Yahoo's screener is unreachable."""
@@ -133,7 +138,7 @@ def exchange_quotes(exchange: str = "BSE", max_pages: int = 20, workers: int = 6
         if not sym.endswith(suffix) or not px or not prev:
             continue
         vol = x.get("regularMarketVolume") or 0
-        rows.append({"ticker": sym, "symbol": sym[: -len(suffix)], "name": (x.get("longName") or x.get("shortName") or sym).title(),
+        rows.append({"ticker": sym, "symbol": sym[: -len(suffix)], "name": _nice(x.get("longName") or x.get("shortName") or sym),
                      "exch": "NSE" if exchange == "NSI" else "BSE", "isin": "", "series": "", "open": x.get("regularMarketOpen"),
                      "high": x.get("regularMarketDayHigh"), "low": x.get("regularMarketDayLow"), "close": float(px),
                      "prev": float(prev), "volume": float(vol), "turnover": float(px) * float(vol), "date": pd.Timestamp.today().normalize()})
