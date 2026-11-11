@@ -783,3 +783,10 @@ def test_movers_use_live_quotes_for_both_exchanges_on_a_trading_day(monkeypatch)
     assert got is not None and got[1]["live"] and len(got[0]) == 1200 and set(got[0]["exch"]) == {"NSE", "BSE"}
     monkeypatch.setattr(live, "exchange_quotes", lambda *a, **k: None)
     assert bhav.live_now() is None                                            # falls back to the official files
+
+
+def test_company_names_keep_their_capitals():
+    from jinni import bhav, live
+
+    assert bhav.nice_name("ICICI Bank Limited") == "ICICI Bank Limited" and bhav.nice_name("ABB INDIA LIMITED") == "Abb India Limited"
+    assert live._nice("HDFC Bank Limited") == "HDFC Bank Limited"
