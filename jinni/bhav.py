@@ -77,8 +77,13 @@ def merge(nse: pd.DataFrame | None, bse: pd.DataFrame | None) -> pd.DataFrame:
     if nse is not None and len(nse):
         n = nse.copy()
         if bse is not None and len(bse):
-            nm = bse.drop_duplicates("isin").set_index("isin")["name"]
-            n["name"] = np.where(n["isin"].isin(nm.index), n["isin"].map(nm), n["name"])
+            # Borrow the company name from the BSE row of the same company: by ISIN when both sides have one,
+            # otherwise by trading symbol. An empty ISIN must never match (it would copy one name onto everything).
+            with_isin = bse[bse["isin"].astype(str).str.len() > 0].drop_duplicates("isin").set_index("isin")["name"]
+            by_sym = bse.drop_duplicates("symbol").set_index("symbol")["name"]
+            has = n["isin"].astype(str).str.len() > 0
+            from_isin = n["isin"].where(has).map(with_isin)
+            n["name"] = from_isin.fillna(n["symbol"].map(by_sym)).fillna(n["name"])
         frames.append(n)
     if bse is not None and len(bse):
         if nse is not None and len(nse):
@@ -100,9 +105,13 @@ def _isin_map() -> dict[str, str]:
         from . import market
 
         u = market.nse_universe()
+        _NSE_NAMES.update(dict(zip(u["symbol"], u["name"].astype(str).str.title())))
         return dict(zip(u["symbol"], u["isin"]))
     except Exception:  # noqa: BLE001
         return {}
+
+
+_NSE_NAMES: dict[str, str] = {}
 
 
 def _fixture() -> pd.DataFrame:
@@ -112,8 +121,26 @@ def _fixture() -> pd.DataFrame:
     return merge(None, parse_bse((Path(fx) / "bse_bhavcopy_sample.csv").read_text().replace("\r", "")))
 
 
-def latest(max_back: int = 7) -> tuple[pd.DataFrame, dict]:
-    out, info = _latest(max_back)
+def live_now() -> tuple[pd.DataFrame, dict] | None:
+    """Current quotes for every NSE and BSE stock from Yahoo's screener (delayed a few minutes), or None."""
+    if demo_forced():
+        return None
+    from . import live
+
+    nse = live.exchange_quotes("NSI")
+    if nse is None or len(nse) < 500:
+        return None
+    out = merge(nse, live.exchange_quotes("BSE"))
+    return out, {"source": "Yahoo live quotes (NSE + BSE)", "date": date.today(), "live": True}
+
+
+def latest(max_back: int = 7, prefer_live: bool = False) -> tuple[pd.DataFrame, dict]:
+    """``prefer_live``: on a trading day whose official file is not out yet, use live quotes for both exchanges so
+    every row is from the same moment (movers). The Finder keeps the official file: it needs full-day turnover."""
+    got = None
+    if prefer_live and date.today().weekday() < 5 and not (cache_dir() / f"bhav_{date.today():%Y%m%d}.pkl").exists():
+        got = live_now()
+    out, info = got if got else _latest(max_back)
     if len(out):
         from .universe import NAME_HINTS
 
@@ -144,6 +171,8 @@ def _latest(max_back: int = 7) -> tuple[pd.DataFrame, dict]:
             continue
         bse = parse_bse(bt) if bt else None
         nse = parse_nse(nt, _isin_map()) if nt else None
+        if nse is not None and _NSE_NAMES:  # NSE's price file has symbols only: take names from NSE's listing file
+            nse["name"] = nse["symbol"].map(_NSE_NAMES).fillna(nse["name"])
         via = []
         if bse is None:  # BSE's site often refuses cloud servers: fall back to Yahoo's list of BSE stocks
             from . import live

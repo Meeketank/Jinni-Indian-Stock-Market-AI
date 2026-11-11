@@ -275,3 +275,31 @@ table.tbl { border-collapse: separate; border-spacing: 0; width: 100%; font-vari
 .row { flex-wrap: wrap; }
 
 .tc-more { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--row-line); color: var(--gold); font-weight: 600; font-size: .85rem; }
+
+/* ---------- motion and polish ---------- */
+.reveal { animation: rise .5s cubic-bezier(.2,.8,.2,1) both; animation-delay: calc(var(--i, 0) * 45ms); }
+.kpi { transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease; position: relative; overflow: hidden; }
+.kpi::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--border); transition: background .2s; }
+.kpi:has(.up)::before { background: var(--up); } .kpi:has(.down)::before { background: var(--down); } .kpi:has(.gold)::before { background: var(--gold); }
+@media (hover: hover) { .kpi:hover, .tcard:hover, .nav-card:hover { transform: translateY(-2px); box-shadow: var(--shadow); border-color: var(--gold); } }
+.tcard, .nav-card { transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease; }
+.tcard.click:active { transform: scale(.985); }
+.plot { opacity: 0; transform: translateY(8px); transition: opacity .5s ease, transform .5s ease; border-radius: var(--radius); }
+.plot.loading, .plot.drawn { opacity: 1; transform: none; }
+.pbar i, .tonebar i { transform-origin: left center; animation: grow .7s cubic-bezier(.2,.8,.2,1) both; }
+@keyframes grow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+.tabs button { position: relative; transition: color .15s; }
+.tabs button::after { content: ""; position: absolute; left: 10px; right: 10px; bottom: -1px; height: 2px; background: var(--gold); transform: scaleX(0); transition: transform .22s ease; border-radius: 2px; }
+.tabs button.on { border-color: transparent; } .tabs button.on::after { transform: scaleX(1); }
+.btn { transition: transform .12s ease, filter .15s ease, background .15s ease; } .btn:active { transform: scale(.97); }
+.badge { transition: transform .15s ease; }
+.callout { border-left-width: 4px; }
+.section-title { display: flex; align-items: center; gap: 10px; } .section-title::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg, var(--border), transparent); }
+.skel { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; max-width: 520px; margin: 18px auto 0; }
+.skel i { height: 54px; border-radius: 12px; background: linear-gradient(100deg, var(--panel2) 30%, var(--panel) 50%, var(--panel2) 70%); background-size: 200% 100%; animation: shimmer 1.3s linear infinite; border: 1px solid var(--border); }
+.skel i.wide { grid-column: 1 / -1; height: 110px; }
+@keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .reveal, .pbar i, .tonebar i, .skel i { animation: none; } .plot { opacity: 1; transform: none; transition: none; }
+  .kpi, .tcard, .nav-card, .btn, .tabs button::after { transition: none; }
+}

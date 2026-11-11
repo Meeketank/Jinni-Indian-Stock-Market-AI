@@ -21,7 +21,7 @@ from .universe import BENCHMARK, NIFTY50, TRADING_DAYS, sector_of
 
 log = logging.getLogger(__name__)
 
-PERIOD_DAYS = {"6mo": 126, "1y": 252, "2y": 504, "3y": 756, "5y": 1260, "10y": 2520}
+PERIOD_DAYS = {"6mo": 126, "1y": 252, "2y": 504, "3y": 756, "5y": 1260, "10y": 2520, "max": 5040}
 
 
 # Per-request override (the web API sets this from the X-Jinni-Demo header); None = use the env var.

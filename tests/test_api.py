@@ -687,3 +687,99 @@ def test_diagnostics_lists_every_source(client):
     tb = [b for b in body["blocks"] if b["type"] == "table"][0]
     names = {r["Source"] for r in tb["rows"]}
     assert {"Yahoo prices", "NSE end-of-day file", "BSE end-of-day file", "Yahoo screener · BSE", "Google News", "GDELT"} <= names
+
+
+# ------------------------------------------------------------------ scenarios
+
+
+def test_event_branches_are_ordered_and_backtested():
+    from jinni import scenarios as sc
+
+    idx = pd.bdate_range("2015-01-01", periods=2600)
+    rng = np.random.default_rng(3)
+    close = pd.Series(100 * np.exp(np.cumsum(rng.normal(0.0003, 0.01, len(idx)))), index=idx)
+    dates = [idx[i] for i in range(200, 2500, 110)]
+    br = sc.branches(close, dates, 0)
+    assert br["n"] == len(dates) and len(br["rows"]) == 3
+    for r in br["rows"]:
+        assert r["Unfav ₹"] < r["Base ₹"] < r["Fav ₹"] and r["Worst"] <= r["Unfavourable"] <= r["Favourable"] <= r["Best"]
+    bt = sc.branch_backtest(close, dates, 0)
+    assert 0.3 <= bt["1 week later"]["inside"] <= 1 and bt["1 week later"]["inside_extremes"] >= bt["1 week later"]["inside"]
+    assert sc.branches(close, dates[:2], 0) is None                         # too few events: no made-up levels
+    # reactions are measured from the close BEFORE the event (no look-ahead in the base)
+    R = sc.reactions(close, [dates[0]], 0)
+    p = close.index.get_loc(dates[0])
+    assert R["Event day"].iloc[0] == pytest.approx(close.iloc[p] / close.iloc[p - 1] - 1)
+
+
+def test_factor_what_if_recovers_a_planted_beta():
+    from jinni import scenarios as sc
+
+    idx = pd.bdate_range("2021-01-01", periods=1200)
+    rng = np.random.default_rng(5)
+    mkt = rng.normal(0.0004, 0.01, len(idx))
+    oil = rng.normal(0, 0.02, len(idx))
+    stock = 1.5 * mkt - 0.3 * oil + rng.normal(0, 0.004, len(idx))
+    px = lambda r: pd.Series(100 * np.exp(np.cumsum(r)), index=idx)  # noqa: E731
+    fit = sc.fit_factors(px(stock), pd.DataFrame({"^NSEI": px(mkt), "BZ=F": px(oil)}))
+    assert fit["betas"]["^NSEI"] == pytest.approx(1.5, abs=0.2) and fit["betas"]["BZ=F"] == pytest.approx(-0.3, abs=0.12)
+    assert fit["oos_r2"] > 0.6
+    w = sc.what_if(fit, {"^NSEI": -0.10})
+    assert w["low"] < w["move"] < w["high"] and w["move"] == pytest.approx(-0.15, abs=0.025)
+
+
+@pytest.mark.parametrize("url", ["/api/scenarios/events", f"/api/scenarios/events?symbol={T}",
+                                  f"/api/scenarios/whatif?symbol={T}&nifty=-10&crude=20", f"/api/scenarios/whatif?symbol={T}"])
+def test_scenario_endpoints(client, url):
+    r = client.get(url)
+    assert r.status_code == 200, r.text[:300]
+    text_ = json.dumps(strict_json(r.text))
+    if "events" in url:
+        assert "Scenarios, not predictions" in text_ and "If it goes badly" in text_ and "Back-test" in text_
+    else:
+        assert "Back-test" in text_ and "Market crash" in text_
+
+
+def test_forecast_ranges_are_calibrated_on_synthetic_data():
+    from jinni import accuracy as ac
+    from jinni import data as jd
+
+    px = jd.get_prices(["TCS.NS", "INFY.NS", "ITC.NS"], "5y")
+    cov = ac.range_coverage({t: px.ohlcv(t) for t in px.tickers}, 21, step=20, n_paths=300)
+    assert cov["n"] > 80 and 0.8 <= cov["in90"] <= 0.97 and 0.38 <= cov["in50"] <= 0.62
+
+
+def test_names_are_never_copied_through_an_empty_isin():
+    """Regression (seen live): BSE rows from Yahoo have no ISIN; an empty ISIN matched every NSE row without one
+    and stamped the first BSE company's name on unrelated stocks."""
+    from jinni import bhav
+
+    mk = lambda t, sym, name, ex, isin: {"ticker": t, "symbol": sym, "name": name, "exch": ex, "isin": isin, "series": "", "open": 1.0,  # noqa: E731
+                                         "high": 1.0, "low": 1.0, "close": 10.0, "prev": 9.0, "volume": 1.0, "turnover": 1.0,
+                                         "date": pd.Timestamp("2026-11-10")}
+    nse = pd.DataFrame([mk("KKJEWELS.NS", "KKJEWELS", "KKJEWELS", "NSE", ""), mk("TCS.NS", "TCS", "TCS", "NSE", "INE467B01029"),
+                        mk("INFY.NS", "INFY", "INFY", "NSE", "")])
+    bse = pd.DataFrame([mk("RELIANCE.BO", "RELIANCE", "Reliance Industries Limited", "BSE", ""),
+                        mk("INFY.BO", "INFY", "Infosys Limited", "BSE", ""), mk("532540.BO", "TCS", "Tata Consultancy Services", "BSE", "INE467B01029")])
+    out = bhav.merge(nse, bse).set_index("ticker")
+    assert out.loc["KKJEWELS.NS", "name"] == "KKJEWELS"                       # unknown stays its own symbol
+    assert out.loc["INFY.NS", "name"] == "Infosys Limited"                    # matched by symbol
+    assert out.loc["TCS.NS", "name"] == "Tata Consultancy Services"           # matched by ISIN
+    assert "INFY.BO" not in out.index and "532540.BO" not in out.index and "RELIANCE.BO" in out.index
+
+
+def test_movers_use_live_quotes_for_both_exchanges_on_a_trading_day(monkeypatch):
+    from jinni import bhav, live
+
+    def fake(exchange, **k):
+        suf = ".NS" if exchange == "NSI" else ".BO"
+        return pd.DataFrame([{"ticker": f"S{i}{suf}", "symbol": f"S{i}" if exchange == "NSI" else f"B{i}", "name": f"Co {i}", "exch": "NSE" if exchange == "NSI" else "BSE",
+                              "isin": "", "series": "", "open": 1.0, "high": 1.0, "low": 1.0, "close": 10.0 + i, "prev": 10.0, "volume": 5.0,
+                              "turnover": 50.0, "date": pd.Timestamp.today().normalize()} for i in range(600)])
+
+    monkeypatch.setattr(live, "exchange_quotes", fake)
+    monkeypatch.setattr(bhav, "demo_forced", lambda: False)
+    got = bhav.live_now()
+    assert got is not None and got[1]["live"] and len(got[0]) == 1200 and set(got[0]["exch"]) == {"NSE", "BSE"}
+    monkeypatch.setattr(live, "exchange_quotes", lambda *a, **k: None)
+    assert bhav.live_now() is None                                            # falls back to the official files

@@ -141,6 +141,7 @@ def validate(close: pd.DataFrame, bench: pd.Series | None, h: int = 21, top_shar
     ft = pd.DataFrame({"Factor": names, "What it measures": [FACTORS[k] for k in names],
                        "Mean IC": [float(ic[k].mean()) for k in names],
                        "t-stat": [float(ic[k].mean() / ic[k].std() * np.sqrt(ic[k].notna().sum())) if ic[k].std() > 0 else np.nan for k in names],
+                       "Recent IC": [float(ic[k].dropna().iloc[-IC_WINDOW:].mean()) for k in names],
                        "Worked %": [float((ic[k].dropna() > 0).mean()) for k in names],
                        "Weight now": [float(wn[k]) for k in names]})
     return Validation(h, ic, cic, wn, curve, stats, ft, z, int(max(10, len(close.columns) * top_share)))

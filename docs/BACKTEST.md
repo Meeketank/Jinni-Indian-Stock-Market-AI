@@ -42,3 +42,30 @@ Technical scores and momentum are therefore shown as **watch-outs**, not used to
   as watch-outs and (for the outlook) a capped ±3-point tilt.
 - Only 19 mostly large, liquid stocks; overlapping windows reduce the effective sample; survivorship bias; "reached" uses the
   intraday high. Small/illiquid stocks behave differently (higher volatility, harder execution).
+
+## Price-forecast ranges (Forecast tab) — run 11 Nov 2026, same 19 stocks
+Each range was built with only the past and compared with the price h trading days later.
+
+| Horizon | Forecasts | Inside the 9-in-10 range (target 90%) | Inside the half range (target 50%) | Ended above the middle |
+|---|---|---|---|---|
+| 1 week | 1,767 | **89.2%** | 52.4% | 49.9% |
+| 1 month | 1,748 | **89.7%** | 51.5% | 49.5% |
+| 3 months | 1,672 | **87.4%** | 52.1% | 49.9% |
+
+The ranges are honest: outcomes fell outside about as often as stated, on both sides. They are also wide (about ±14% over a
+month for a typical stock), which is the real uncertainty, not a flaw.
+
+## Trend state as a predictor
+Pooled over the 19 stocks, the next-month return by trend state did not hold up across time (2021–mid 2024: strong uptrends
++3.3%, strong downtrends +2.9%; mid 2024–2026: −0.6% and −0.3%). Trend describes the present; it did not predict.
+Among the highest-chance picks, however, stocks with a technical score of 40 or more averaged +0.7% to +1.8% per trade on
+monthly goals against −0.1% to +1.0% for weak-trend ones, which is why the Finder offers an "Uptrends first" ranking.
+
+## Scenario tools
+- **What-if shocks**: a one-factor (NIFTY) weekly model, fitted on the first 70% of three years and checked on the rest,
+  explained on average **28%** of each stock's weekly moves out of sample (correlation 0.57; from 60% for HDFC Bank to
+  none for Sun Pharma and Tata Power). The app shows this figure per stock next to every scenario.
+- **Event branches** (NIFTY, 5 years): replaying RBI decisions (21 replays) and Fed decisions (34), the 1-week result landed
+  between the "goes badly" and "goes well" levels 76% of the time and inside the full earlier range 86–94%. RBI and Fed days
+  were only about 7–8% bigger than ordinary days; Budget days in this window were smaller. Elections have 3–5 occurrences,
+  too few to back-test, and the app says so.

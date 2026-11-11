@@ -13,6 +13,11 @@ export async function render(view) {
       const hz = Segmented({ label: 'Horizon', options: [[1, 'Next session'], [5, 'Next 5 sessions']], value: 1 });
       livePanel(p, [hz], () => get('/outlook/market', { h: hz.get() }));
     } },
+    { label: 'Scenarios', load: (p) => {
+      p.append(h('p', { class: 'page-sub' }, 'Before an election result, a rate decision or a Budget: the level if it goes well, the typical level and the level if it goes badly, from every past occurrence, with a back-test.'));
+      const s = Select({ label: 'Market / stock', options: measure, value: '^NSEI' });
+      livePanel(p, [s], () => get('/scenarios/events', { symbol: s.get() }));
+    } },
     { label: 'Live news', load: (p) => livePanel(p, [], () => get('/sentiment/live')) },
     { label: 'Market mood', load: (p) => livePanel(p, [], () => get('/mood')) },
     { label: 'News tone', load: (p) => {
