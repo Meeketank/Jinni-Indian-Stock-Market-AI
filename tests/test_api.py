@@ -790,3 +790,22 @@ def test_company_names_keep_their_capitals():
 
     assert bhav.nice_name("ICICI Bank Limited") == "ICICI Bank Limited" and bhav.nice_name("ABB INDIA LIMITED") == "Abb India Limited"
     assert live._nice("HDFC Bank Limited") == "HDFC Bank Limited"
+
+
+def test_live_movers_take_nse_names_from_the_listing_file(monkeypatch):
+    from jinni import bhav, live
+
+    row = lambda t, sym, name, ex: {"ticker": t, "symbol": sym, "name": name, "exch": ex, "isin": "", "series": "", "open": 1.0, "high": 1.0,  # noqa: E731
+                                    "low": 1.0, "close": 10.0, "prev": 9.0, "volume": 1.0, "turnover": 1.0, "date": pd.Timestamp("2026-11-11")}
+    nse = pd.DataFrame([row("ICICIBANK.NS", "ICICIBANK", "Icici Bank Limited", "NSE")] + [row(f"S{i}.NS", f"S{i}", f"S{i}", "NSE") for i in range(600)])
+    monkeypatch.setattr(live, "exchange_quotes", lambda ex, **k: nse.copy() if ex == "NSI" else None)
+    monkeypatch.setattr(bhav, "demo_forced", lambda: False)
+
+    def fake_map():
+        bhav._NSE_NAMES.update({"ICICIBANK": "ICICI Bank Limited"})
+        return {"ICICIBANK": "INE090A01021"}
+
+    monkeypatch.setattr(bhav, "_isin_map", fake_map)
+    out, info = bhav.live_now()
+    r = out.set_index("ticker").loc["ICICIBANK.NS"]
+    assert r["name"] == "ICICI Bank Limited" and r["isin"] == "INE090A01021" and info["live"]

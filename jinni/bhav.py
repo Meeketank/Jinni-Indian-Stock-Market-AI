@@ -136,6 +136,10 @@ def live_now() -> tuple[pd.DataFrame, dict] | None:
     nse = live.exchange_quotes("NSI")
     if nse is None or len(nse) < 500:
         return None
+    isin = _isin_map()  # NSE's own listing file: proper company names ("ICICI Bank Limited") and ISINs
+    if _NSE_NAMES:
+        nse["name"] = nse["symbol"].map(_NSE_NAMES).fillna(nse["name"])
+        nse["isin"] = nse["symbol"].map(isin).fillna("")
     out = merge(nse, live.exchange_quotes("BSE"))
     return out, {"source": "Yahoo live quotes (NSE + BSE)", "date": date.today(), "live": True}
 
