@@ -97,3 +97,44 @@ def universe(max_pages: int = 14) -> pd.DataFrame | None:
     except Exception as e:  # noqa: BLE001
         log.warning("NSE screener (universe) failed after %d rows: %s", len(rows), e)
     return pd.DataFrame(rows) if rows else None
+
+
+def exchange_quotes(exchange: str = "BSE", max_pages: int = 20, workers: int = 6) -> pd.DataFrame | None:
+    """Latest quote for every stock Yahoo lists on an exchange ("NSI" or "BSE"), fetched 250 at a time in parallel.
+    Used when the exchange's own end-of-day file cannot be downloaded. None if Yahoo's screener is unreachable."""
+    if demo_forced():
+        return None
+    from concurrent.futures import ThreadPoolExecutor
+
+    from yfinance import EquityQuery
+
+    q = EquityQuery("eq", ["exchange", exchange])
+    suffix = ".NS" if exchange == "NSI" else ".BO"
+
+    def page(i: int) -> list[dict]:
+        try:
+            resp = _yf().screen(q, size=250, offset=i * 250, sortField="intradaymarketcap", sortAsc=False)
+            return resp.get("quotes", []) if isinstance(resp, dict) else []
+        except Exception as e:  # noqa: BLE001
+            log.warning("screener %s page %d failed: %s", exchange, i, e)
+            return []
+
+    first = page(0)
+    if not first:
+        return None
+    quotes = list(first)
+    if len(first) == 250:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for got in ex.map(page, range(1, max_pages)):
+                quotes += got
+    rows = []
+    for x in quotes:
+        sym, px, prev = str(x.get("symbol", "")), x.get("regularMarketPrice"), x.get("regularMarketPreviousClose")
+        if not sym.endswith(suffix) or not px or not prev:
+            continue
+        vol = x.get("regularMarketVolume") or 0
+        rows.append({"ticker": sym, "symbol": sym[: -len(suffix)], "name": (x.get("longName") or x.get("shortName") or sym).title(),
+                     "exch": "NSE" if exchange == "NSI" else "BSE", "isin": "", "series": "", "open": x.get("regularMarketOpen"),
+                     "high": x.get("regularMarketDayHigh"), "low": x.get("regularMarketDayLow"), "close": float(px),
+                     "prev": float(prev), "volume": float(vol), "turnover": float(px) * float(vol), "date": pd.Timestamp.today().normalize()})
+    return pd.DataFrame(rows).drop_duplicates("ticker") if rows else None

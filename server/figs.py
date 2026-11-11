@@ -359,3 +359,18 @@ def price_chart(df: pd.DataFrame, overlays: list[str], panels: list[str], layers
                                   "color": UP if bias > 0 else DOWN, "opacity": 0.8}})
     lay = S.layout(panels, y1_range=[lo * 0.96, hi * 1.04])
     return {"data": S.data, "layout": lay}
+
+
+def fan_chart(hist: pd.Series, fan: pd.DataFrame, title: str = "") -> dict:
+    """Recent prices followed by the simulated range ahead (50% and 90% bands around the median path)."""
+    fut = [d.strftime("%Y-%m-%d") for d in pd.bdate_range(hist.index[-1], periods=len(fan) + 1)[1:]]
+    data = [{"type": "scatter", "mode": "lines", "x": _x(hist.index), "y": _v(hist, 2), "name": "Price",
+             "line": {"color": MUTED, "width": 1.5}},
+            {"type": "scatter", "x": fut, "y": _v(fan["p95"], 2), "line": {"width": 0}, "showlegend": False, "hoverinfo": "skip"},
+            {"type": "scatter", "x": fut, "y": _v(fan["p5"], 2), "fill": "tonexty", "line": {"width": 0},
+             "fillcolor": "rgba(76,141,255,0.12)", "name": "9 in 10 outcomes"},
+            {"type": "scatter", "x": fut, "y": _v(fan["p75"], 2), "line": {"width": 0}, "showlegend": False, "hoverinfo": "skip"},
+            {"type": "scatter", "x": fut, "y": _v(fan["p25"], 2), "fill": "tonexty", "line": {"width": 0},
+             "fillcolor": "rgba(76,141,255,0.25)", "name": "Half of outcomes"},
+            {"type": "scatter", "x": fut, "y": _v(fan["p50"], 2), "name": "Middle path", "line": {"color": BLUE, "width": 2}}]
+    return fig(data, {"title": title, "hovermode": "x unified"})

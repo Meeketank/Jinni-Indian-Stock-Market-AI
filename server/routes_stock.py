@@ -16,6 +16,7 @@ from jinni import seasonality as jseason
 from jinni import sentiment as sm
 from jinni import setups as jsetups
 from jinni import signals, ta
+from jinni import trend as jtrend
 from jinni.universe import BENCHMARK, NIFTY50, display_name, normalize_symbol
 
 from . import figs
@@ -331,6 +332,62 @@ def odds(t: str, target: float = Query(0.05, ge=0.005, le=1), hz: int = Query(21
     act = jsetups.active_setups(c.df)
     blocks.append(caption(("Active setups: " + ", ".join(act) + ". ") if act else "No chart setup active today. "))
     return reply(doc(blocks, c.source), ttl=600)
+
+
+# --------------------------------------------------------------- forecast
+
+
+@router.get("/stock/{t}/forecast")
+def forecast(t: str):
+    """Price forecast as a range for several horizons, the current trend, and what followed the same trend before."""
+    c = ctx(t)
+    df = c.df
+    price = float(df["Close"].iloc[-1])
+    tr = jtrend.describe(df)
+    pf = memo(("pforecast", c.t, str(df.index[-1])), CTX_TTL, lambda: jtrend.price_forecast(df))
+    blocks = source_notice(c.source)
+    blocks.append(callout("warn", "**Nobody can know a future price.** This is a range of outcomes built from how this stock has "
+                                  "actually moved (its own daily swings, rescaled to today's volatility), not a promise. Read the "
+                                  "middle value as 'most typical', and the low/high as the edges that 9 in 10 outcomes fall inside."))
+    m1 = pf[pf["Horizon"] == "1 month"]
+    tone_ = "up" if tr["state"] > 0 else "down" if tr["state"] < 0 else "gold"
+    items = [("Trend now", tr["label"], f"{tr['days_in_state']} days in this state", tone_),
+             ("3-month slope", pct(tr["slope_month"], 1, True) + " / month", f"fit {tr['r2']:.0%} · ADX {tr['adx']:.0f}", tone(tr["slope_month"])),
+             ("vs 50 / 200-day average", f"{pct(tr['vs50'], 1, True)} / {pct(tr['vs200'], 1, True)}", f"{pct(tr['hi52'], 0)} from 52-week high")]
+    if len(m1):
+        r = m1.iloc[0]
+        items += [("Typical price in 1 month", f"₹{r['Median']:,.2f}", f"now ₹{price:,.2f}"),
+                  ("Likely range in 1 month", f"₹{r['Low']:,.0f} – ₹{r['High']:,.0f}", "9 in 10 outcomes"),
+                  ("Chance of +10% / −10%", f"{pct(r['P +10%'], 0)} / {pct(r['P -10%'], 0)}", "by the end of 1 month")]
+    blocks.append(kpis(items))
+    sim = memo(("pfan", c.t, str(df.index[-1])), CTX_TTL,
+               lambda: fc.simulate(df, 63, 0.05, None, n_paths=4000, annual_drift=fc.MARKET_DRIFT))
+    blocks.append(plot(figs.fan_chart(df["Close"].iloc[-126:], sim.fan, "Price range over the next 3 months"), 380))
+    blocks.append(section("Price forecast by horizon"))
+    blocks.append(table(pf, [col("Horizon", "By"), col("Low", "Low ₹ (5%)", "inr2"), col("Median", "Typical ₹", "inr2"),
+                             col("High", "High ₹ (95%)", "inr2"), col("P up", "Finishes higher", "pct0"),
+                             col("P +5%", "≥ +5%", "pct0"), col("P +10%", "≥ +10%", "pct0"), col("P +20%", "≥ +20%", "pct0"),
+                             col("P -5%", "≤ −5%", "pct0"), col("P -10%", "≤ −10%", "pct0")]))
+    blocks.append(caption("Chances are for where the price ends at that date. The chance of touching a level at any time on the "
+                          "way is higher: see Return odds. Long-run drift is set to the market's (about 11% a year), not this "
+                          "stock's recent run, so a hot streak is not extrapolated."))
+    af = jtrend.after_state(df)
+    if len(af):
+        blocks.append(section(f"What {display_name(c.t)} did after being in each trend state"))
+        cur = af[af["s"] == tr["state"]]
+        if len(cur):
+            m = cur[cur["Horizon"] == "1 month"]
+            if len(m):
+                r = m.iloc[0]
+                blocks.append(text(f"Today's state is **{tr['label']}**. On the {int(r['Days'])} past days in that state, the next "
+                                   f"month averaged **{r['Avg move']:+.1%}** and was higher **{r['Up %']:.0%}** of the time "
+                                   f"(worst 5% of cases: {r['Worst 5%']:+.0%})."))
+        blocks.append(table(af.drop(columns="s"), [col("State", "Trend state"), col("Horizon", "Next"), col("Days", "Past days", "int"),
+                                                   col("Avg move", "Average", "spct1"), col("Median", "Typical", "spct1"),
+                                                   col("Up %", "Higher", "pct0"), col("Worst 5%", "Bad case", "spct1")]))
+        blocks.append(caption("One stock's own history, with overlapping periods, so treat it as context. In a pooled test on 19 "
+                              "real NSE stocks the trend state did not predict the next month consistently across years."))
+    return reply(doc(blocks, c.source, trend=tr["label"]), ttl=600)
 
 
 # ------------------------------------------------------------ seasonality

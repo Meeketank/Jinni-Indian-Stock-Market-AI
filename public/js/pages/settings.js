@@ -52,7 +52,7 @@ export async function render(view) {
   };
   const importer = FileText({ label: '', accept: '.json,application/json', button: 'Restore backup', onText: (t) => { try { store.importAll(JSON.parse(t)); toast('Backup restored'); setTimeout(() => location.reload(), 600); } catch (e) { toast(e.message); } } });
   view.append(card(h('h3', {}, 'Data'), h('div', { class: 'row', style: { margin: '10px 0' } },
-    button('Check live data', check, 'primary'), button('Clear cached results', () => { clearCache(); toast('Cache cleared'); })),
+    button('Check live data', check, 'primary'), button('Check every data source', async () => { status.loading('Trying every source from the server…'); try { const d = await get('/diagnostics', {}, { fresh: true }); status.show(d.blocks); } catch (e) { status.error(e); } }), button('Clear cached results', () => { clearCache(); toast('Cache cleared'); })),
     status.el, h('p', { class: 'hint' }, 'Prices come from Yahoo Finance and are cached for a few minutes to respect rate limits. If live data is unavailable, JINNI says so instead of showing made-up numbers.')),
     card(h('h3', {}, 'Backup'), h('p', { class: 'hint' }, 'Your holdings, watchlist, journal and settings live only in this browser. Export a backup before clearing browser data or switching devices.'),
       h('div', { class: 'row' }, button('Export backup', () => download('jinni_backup.json', JSON.stringify(store.exportAll(), null, 2), 'application/json'), '', 'download'), importer)),

@@ -97,6 +97,7 @@ class SimResult:
     fan: pd.DataFrame        # percentiles of price per day
     n_paths: int
     seed: int
+    terminal: np.ndarray | None = None   # simulated return at the end of the horizon, one per path
 
 
 def simulate(df: pd.DataFrame, horizon: int, target: float, stop: float | None, n_paths: int = 5000,
@@ -161,7 +162,7 @@ def simulate(df: pd.DataFrame, horizon: int, target: float, stop: float | None, 
         ev=float(realised.mean()),
         mean_neither=float(ret[neither].mean()) if neither.any() else 0.0,
         median_days_to_target=float(np.median(ft[tgt_first] + 1)) if tgt_first.any() else np.nan,
-        terminal_pct=dict(zip(q, term)), fan=fan, n_paths=n_paths, seed=seed,
+        terminal_pct=dict(zip(q, term)), fan=fan, n_paths=n_paths, seed=seed, terminal=np.expm1(c[:, -1]),
     )
 
 

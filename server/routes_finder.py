@@ -15,6 +15,7 @@ from jinni import data as jdata
 from jinni import events as jevents
 from jinni import forecast as fc
 from jinni import market, risk, setups, signals
+from jinni import trend as jtrend
 from jinni import riskcheck as rc
 from jinni.universe import BENCHMARK, NIFTY50, display_name, normalize_symbol, sector_of
 
@@ -63,10 +64,14 @@ def scan_chunk(tickers: str = Query(..., max_length=3000), target: float = Query
         raise ApiError(400, "No tickers.")
     pdx = prices(tk, "1y", ttl=3600)
     pf = market.prefilter(pdx, budget or None, target, hz, min_px, min_val)
+    c_ = pdx.close
+    s50, s200 = c_.rolling(50).mean().iloc[-1], c_.rolling(200, min_periods=120).mean().iloc[-1]
+    last_ = c_.ffill().iloc[-1]
+    up = (last_ > s50) & (s50 > s200)  # simple "healthy uptrend" flag for the trend-first ranking
     rows = []
     for t, r in pf.iterrows():
         rows.append({"t": t, "price": r["Price"], "vol": r["Daily vol"], "val": r["Traded value ₹Cr"],
-                     "q": r["Quick P(touch)"], "why": r["Excluded because"]})
+                     "q": r["Quick P(touch)"], "why": r["Excluded because"], "up": bool(up.get(t, False))})
     return reply({"rows": rows, "missing": pdx.missing, "source": pdx.source}, ttl=1800)
 
 
@@ -115,21 +120,20 @@ def run_finder(tickers: list[str], hz: int, target: float, mode: str, fixed: flo
     return out, act, ml, ml_err, base, pdx, dfs, cut
 
 
-GRADE_COLS = [col("Stock", "Stock"), col("P(touch target)", "Chance to reach target", "bar01",
-                                          help="Probability the price touches the target at any point in the window (no stop). "
-                                               "Driven mostly by how volatile the stock is."),
+GRADE_COLS = [col("Stock", "Stock"),
+              col("P(touch target)", "Chance to reach target", "bar01",
+                  help="Probability the price touches the target at any point in the window"),
+              col("Exp price", "Typical price at the end", "inr2", help="Middle of the simulated outcomes at the end of the window"),
+              col("Range", "Likely range (9 in 10)"),
+              col("Trend", "Trend now", "badge"),
+              col("Price", "Price now", "inr2"), col("Target ₹", "Target ₹", "inr2"),
+              col("Typical days", "Days to target", "n0", help="Median days to the target when it is reached"),
               col("P(target first)", "Target before stop", "pct0", help="Reaches the target before hitting the stop"),
-              col("P(stop first)", "Stop hit first", "pct0"),
-              col("Exp. return", "Avg return / trade", "spct2",
-                  help="Average result per trade after stop-outs and ~0.3% costs. Much smaller than the target on purpose."),
-              col("Grade", "Grade", "grade"),
-              col("Tech", "Technical", "n0", help="JINNI technical score 0-100 (trend, momentum, timing, volume, risk)"),
-              col("Quality", "Fundamentals", "n0", help="0-100 from ROE, debt, margins, growth, P/E; blank if unavailable"),
-              col("News", "News tone", "tone", help="Recent headline tone for this stock, -1 to +1"),
-              col("Flags", "Watch-outs"),
-              col("Price", "Price", "inr2"), col("Target ₹", "Target ₹", "inr2"), col("Stop ₹", "Stop ₹", "inr2"),
-              col("Stop %", "Stop %", "pct1"), col("Typical days", "Days", "n0", help="Median days to target when hit"),
-              col("Verdict", "Verdict"), col("Setups", "Setups")]
+              col("Stop ₹", "Suggested stop ₹", "inr2"),
+              col("Exp. return", "Avg outcome / trade", "spct2",
+                  help="Average result per trade once stop-outs and ~0.3% costs are counted. Always far below the target."),
+              col("Tech", "Technical 0-100", "n0"), col("Quality", "Fundamentals 0-100", "n0"),
+              col("News", "News tone", "tone"), col("Flags", "Watch-outs"), col("Setups", "Setups")]
 
 
 def _enrich(tbl: pd.DataFrame, dfs: dict, bench, top: int = 15, budget_s: float = 9.0) -> pd.DataFrame:
@@ -192,7 +196,7 @@ def sm_score(news: pd.DataFrame) -> float:
 @router.get("/finder")
 def finder(target: float = Query(0.05, ge=0.005, le=1), hz: int = Query(21, ge=2, le=250), stop: str = "auto",
            tickers: str = Query(..., max_length=2500), ml: int = 1, budget: float = Query(0, ge=0),
-           max_names: int = Query(3, ge=1, le=5)):
+           max_names: int = Query(3, ge=1, le=5), rank: str = "chance"):
     from jinni import bhav
 
     memo(("bhav",), 900, bhav.latest)  # fills company names for BSE scrip codes
@@ -209,11 +213,18 @@ def finder(target: float = Query(0.05, ge=0.005, le=1), hz: int = Query(21, ge=2
         rows.append({"ticker": t, "Stock": display_name(t), "Grade": f.grade, "P(target first)": f.p_target,
                      "P(stop first)": f.p_stop, "P(touch target)": f.p_touch, "Exp. return": f.ev, "Price": f.price,
                      "Target ₹": f.target_price, "Stop ₹": f.stop_price, "Stop %": f.stop_pct,
-                     "Typical days": f.days_to_target, "Verdict": f.verdict, "Setups": ", ".join(act.get(t, [])),
+                     "Typical days": f.days_to_target, "Verdict": f.verdict,
+                     "Exp price": f.price * (1 + f.sim.terminal_pct[50]),
+                     "Range": f"₹{f.price * (1 + f.sim.terminal_pct[5]):,.0f} – ₹{f.price * (1 + f.sim.terminal_pct[95]):,.0f}",
+                     "Trend": jtrend.LABELS[int(jtrend.state_series(dfs[t]).iloc[-1])] if pd.notna(jtrend.state_series(dfs[t]).iloc[-1]) else "Sideways", "Setups": ", ".join(act.get(t, [])),
                      "Sector": sector_of(t), "as_of": f.as_of, "engines": f.engines, "p_target": f.p_target,
                      "notes": f.notes})
     tbl = pd.DataFrame(rows).sort_values("P(touch target)", ascending=False)
     tbl = _enrich(tbl, dfs, base_bench(pdx))
+    if rank == "trend":      # healthy trends first, then by chance
+        tbl = tbl.assign(_u=tbl["Trend"].isin(["Uptrend", "Strong uptrend"])).sort_values(["_u", "P(touch target)"], ascending=False).drop(columns="_u")
+    elif rank == "outcome":  # best average result per trade after stops and costs
+        tbl = tbl.sort_values("Exp. return", ascending=False)
     gc = tbl["Grade"].value_counts()
     hz_label = next((k for k, v in fc.HORIZONS.items() if v == hz), f"{hz} days")
     stop_txt = "auto stop" if mode == "auto" else f"−{fixed:.1%} stop" if fixed else "no stop"
@@ -236,9 +247,8 @@ def finder(target: float = Query(0.05, ge=0.005, le=1), hz: int = Query(21, ge=2
                                   "window; it rises with volatility, so the top of the list is the most active stocks. "
                                   "“Target before stop” and “Avg return / trade” are lower because stops get hit and costs apply: "
                                   "an average of well under 1% per trade is normal even when the chance of touching +5% is above 50%. "
-                                  "In a walk-forward test on real NSE stocks, the probability engine's rankings were useful "
-                                  "(AUC about 0.6 to 0.7) while technical scores and momentum added nothing, so they are shown as "
-                                  "watch-outs, not used to rank. See Lab → System accuracy."))
+                                  "Tested on real NSE history the chance figures were close to what happened (see Lab → System accuracy). "
+                                  "Tap any stock for its full forecast, price range, history and trade plan."))
     blocks.append(table(tbl, GRADE_COLS, select={"key": "ticker", "action": "detail"},
                         height=min(560, 44 + 38 * len(tbl))))
 

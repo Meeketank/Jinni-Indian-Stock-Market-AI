@@ -36,6 +36,8 @@ export async function render(view) {
   const maxNames = Slider({ label: 'Split the budget across up to', min: 1, max: 5, value: last.maxNames || 3, fmt: (v) => `${v} stock${v > 1 ? 's' : ''}` });
   const deepN = Slider({ label: 'Market scan: deep-analyse the top', min: 20, max: 60, step: 10, value: last.deepN || 40, fmt: (v) => `${v} stocks`,
     help: 'Stage 1 screens every listed stock; the best N go through all three engines.' });
+  const rank = Segmented({ label: 'Rank by', options: [['chance', 'Highest chance'], ['trend', 'Uptrends first'], ['outcome', 'Best avg outcome']], value: last.rank || 'chance',
+    help: 'Highest chance favours the most volatile stocks. Uptrends first puts stocks already rising at the top.' });
   const ml = Toggle({ label: 'Include ML engine (slower, more thorough)', value: last.ml ?? true });
   const minPx = NumberInput({ label: 'Min price (₹)', value: last.minPx || 20, min: 1, step: 5 });
   const minVal = NumberInput({ label: 'Min daily traded value (₹ Cr)', value: last.minVal || 1, min: 0.05, step: 0.25, help: 'Filters out thin stocks you cannot enter or exit at the shown price.' });
@@ -51,7 +53,7 @@ export async function render(view) {
   };
   [target, stop, universe].forEach((c) => c.onChange(sync)); sync();
   const runBtn = button('Find opportunities', () => run(), 'primary block', 'search');
-  view.append(card(formGrid(target, targetC, within, stop, stopF, universe, custom, budget, maxNames, deepN, ml), filters, h('div', { style: { marginTop: '12px' } }, runBtn)));
+  view.append(card(formGrid(target, targetC, within, stop, stopF, universe, custom, budget, maxNames, rank, deepN, ml), filters, h('div', { style: { marginTop: '12px' } }, runBtn)));
 
   const res = new Results(); const out = h('div'); const detail = new Results();
   view.append(res.el, out, detail.el);
@@ -65,7 +67,7 @@ export async function render(view) {
   };
 
   async function marketScan(p) {
-    res.loading('Scanning the entire NSE market…', 'Loading the stock list');
+    res.loading('Scanning every listed stock (NSE + BSE)…', 'Loading the stock list');
     const uni = await get('/market/universe', { sme: sme.get() ? 1 : 0, min_val: minVal.get() || 1, min_px: minPx.get() || 20 });
     let tickers = uni.rows.map((r) => r[0]);
     if (uploaded?.length) tickers = uploaded.map((x) => (x.includes('.') ? x : `${x}.NS`));
@@ -83,7 +85,7 @@ export async function render(view) {
     };
     await Promise.all(Array.from({ length: PARALLEL }, worker));
     if (!rows.length) throw lastErr || new Error('No price data could be loaded.');
-    const ok = rows.filter((r) => !r.why).sort((a, b) => b.q - a.q);
+    const ok = rows.filter((r) => !r.why).sort((a, b) => (rank.get() === 'trend' ? (b.up - a.up) : 0) || b.q - a.q);
     const reasons = {}; rows.filter((r) => r.why).forEach((r) => r.why.split('; ').forEach((w) => { reasons[w] = (reasons[w] || 0) + 1; }));
     const top = ok.slice(0, deepN.get()).map((r) => r.t);
     state.funnel = { listed: uni.listed || uni.count, source: uni.source, scanned: rows.length, passed: ok.length, deep: top.length, reasons, failed: failed * CHUNK };
@@ -95,7 +97,7 @@ export async function render(view) {
     detail.clear(); out.replaceChildren(); state = { funnel: null };
     const p = params(); let tickers;
     store.saveLast('finder', { target: target.get(), targetC: targetC.get(), within: within.get(), stop: stop.get(), stopF: stopF.get(),
-      universe: universe.get(), custom: custom.get(), budget: budget.get(), maxNames: maxNames.get(), deepN: deepN.get(), ml: ml.get(), minPx: minPx.get(), minVal: minVal.get() });
+      universe: universe.get(), rank: rank.get(), custom: custom.get(), budget: budget.get(), maxNames: maxNames.get(), deepN: deepN.get(), ml: ml.get(), minPx: minPx.get(), minVal: minVal.get() });
     runBtn.disabled = true;
     try {
       const u = universe.get();
@@ -107,7 +109,7 @@ export async function render(view) {
         tickers = tickers.slice(0, 70);
       }
       res.loading(`Running ${tickers.length} stocks through 3 engines…`, 'Time Machine · history replay · ML model');
-      const d = await get('/finder', { target: p.t, hz: p.hz, stop: p.st, tickers: tickers.join(','), ml: ml.get() ? 1 : 0, budget: budget.get() || 0, max_names: maxNames.get() });
+      const d = await get('/finder', { target: p.t, hz: p.hz, stop: p.st, tickers: tickers.join(','), ml: ml.get() ? 1 : 0, budget: budget.get() || 0, max_names: maxNames.get(), rank: rank.get() });
       state.doc = d; state.p = p; show();
     } catch (e) { res.error(e, run); } finally { runBtn.disabled = false; }
   }
@@ -135,7 +137,7 @@ export async function render(view) {
       }, '', 'plus'));
     }
     out.append(act);
-    if (!detail.el.childNodes.length) out.append(h('div', { class: 'caption' }, 'Tap a stock in the table for its price cone, history, sizing and risk check.'));
+    if (!detail.el.childNodes.length) out.append(h('div', { class: 'caption' }, 'Tap any stock above for its full details: forecast range, history, sizing and risk check.'));
   }
 
   function trackRow(r, d, qty, source) {

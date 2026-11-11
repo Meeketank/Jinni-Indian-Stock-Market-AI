@@ -34,7 +34,8 @@ COLS = ["ticker", "symbol", "name", "exch", "isin", "series", "open", "high", "l
 
 def _get(url: str, referer: str) -> str | None:
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": referer, "Accept": "text/csv,*/*"})
+        req = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": referer, "Accept": "text/csv,*/*",
+                                                   "Accept-Language": "en-IN,en;q=0.9", "Origin": referer.rstrip("/")})
         with urllib.request.urlopen(req, timeout=15) as r:
             txt = r.read().decode("utf-8", "ignore")
         return txt if len(txt) > 5000 and "<html" not in txt[:300].lower() else None
@@ -80,7 +81,12 @@ def merge(nse: pd.DataFrame | None, bse: pd.DataFrame | None) -> pd.DataFrame:
             n["name"] = np.where(n["isin"].isin(nm.index), n["isin"].map(nm), n["name"])
         frames.append(n)
     if bse is not None and len(bse):
-        b = bse[~bse["isin"].isin(set(nse["isin"]) if nse is not None and len(nse) else set())]
+        if nse is not None and len(nse):
+            has_isin = bse["isin"].astype(str).str.len() > 0
+            dup = (has_isin & bse["isin"].isin(set(nse["isin"]) - {""})) | (~has_isin & bse["symbol"].isin(set(nse["symbol"])))
+            b = bse[~dup]
+        else:
+            b = bse
         frames.append(b)
     if not frames:
         return pd.DataFrame(columns=COLS)
@@ -128,7 +134,8 @@ def _latest(max_back: int = 7) -> tuple[pd.DataFrame, dict]:
         f = cache_dir() / f"bhav_{d:%Y%m%d}.pkl"
         if f.exists():
             try:
-                return pd.read_pickle(f), {"source": "NSE + BSE bhavcopy (cached)", "date": d}
+                got, src0 = pd.read_pickle(f)
+                return got, {"source": src0 + " (cached)", "date": d}
             except Exception:  # noqa: BLE001
                 pass
         bt = _get(BSE_URL.format(d=d), "https://www.bseindia.com/")
@@ -137,13 +144,26 @@ def _latest(max_back: int = 7) -> tuple[pd.DataFrame, dict]:
             continue
         bse = parse_bse(bt) if bt else None
         nse = parse_nse(nt, _isin_map()) if nt else None
+        via = []
+        if bse is None:  # BSE's site often refuses cloud servers: fall back to Yahoo's list of BSE stocks
+            from . import live
+
+            bse = live.exchange_quotes("BSE")
+            via.append("BSE via Yahoo" if bse is not None else "BSE unavailable")
         out = merge(nse, bse)
         if out.empty:
             continue
+        src = " + ".join(x for x, t in (("NSE", nt), ("BSE", bt)) if t) + " bhavcopy" + (f" + {via[0]}" if via else "")
         try:
-            out.to_pickle(f)
+            pd.to_pickle((out, src), f)
         except Exception:  # noqa: BLE001
             pass
-        src = " + ".join(x for x, t in (("NSE", nt), ("BSE", bt)) if t) + " bhavcopy"
         return out, {"source": src, "date": d}
+    # Neither exchange file: build the whole list from Yahoo's screener (both exchanges) before giving up.
+    from . import live
+
+    nse, bse = live.exchange_quotes("NSI"), live.exchange_quotes("BSE")
+    out = merge(nse, bse)
+    if len(out):
+        return out, {"source": "Yahoo screener (exchange files unreachable)", "date": day}
     return pd.DataFrame(columns=COLS), {"source": None, "date": None, "error": "NSE and BSE end-of-day files are not reachable right now."}

@@ -39,6 +39,81 @@ def health(deep: int = 0):
     return reply(out)
 
 
+@router.get("/diagnostics")
+def diagnostics():
+    """Try every external data source once, in parallel, and report which ones answer from this server."""
+    import time as _t
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import date, timedelta
+
+    from jinni import bhav, constituents, live
+    from jinni import newsfeeds as nf
+
+    d = date.today()
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    prev = d - timedelta(days=3 if d.weekday() == 0 else 1)
+
+    def yahoo_prices():
+        p = jdata._download_yahoo(["^NSEI"], "5d", "1d")
+        return f"latest close {p.close.index[-1]:%d %b}" if p is not None else None
+
+    def yahoo_screen(ex):
+        q = live.exchange_quotes(ex, max_pages=1)
+        return f"{len(q)} quotes on the first page" if q is not None else None
+
+    def yahoo_search():
+        r = jdata._yf().Search("tata", max_results=5, news_count=0, lists_count=0, recommended=0, timeout=8, raise_errors=False).quotes
+        return f"{len(r)} matches" if r else None
+
+    def text_len(url, ref):
+        t = bhav._get(url, ref)
+        return f"{len(t):,} bytes" if t else None
+
+    def small(url):
+        raw = nf._get(url, timeout=8)
+        return f"{len(raw):,} bytes" if raw else None
+
+    checks = [
+        ("Yahoo prices", "price history for every chart and model", yahoo_prices),
+        ("Yahoo screener · NSE", "live quotes fallback", lambda: yahoo_screen("NSI")),
+        ("Yahoo screener · BSE", "BSE stock list when BSE's own file is blocked", lambda: yahoo_screen("BSE")),
+        ("Yahoo search", "symbol search", yahoo_search),
+        ("NSE stock list", "all NSE listings", lambda: text_len(market.NSE_URLS[0], "https://www.nseindia.com/")),
+        ("NSE end-of-day file", "movers and the liquid universe", lambda: text_len(bhav.NSE_URL.format(d=prev), "https://www.nseindia.com/")),
+        ("BSE end-of-day file", "BSE-only stocks", lambda: text_len(bhav.BSE_URL.format(d=prev), "https://www.bseindia.com/")),
+        ("NSE NIFTY 50 file", "index membership and sectors", lambda: (lambda t: f"{len(t):,} bytes" if t else None)(constituents._fetch(constituents.URLS[0]))),
+        ("Google News", "news sentiment", lambda: small(nf._google("Sensex", 2))),
+        ("Economic Times RSS", "news sentiment", lambda: small(nf.PUBLISHER_FEEDS["Economic Times"])),
+        ("Moneycontrol RSS", "news sentiment", lambda: small(nf.PUBLISHER_FEEDS["Moneycontrol"])),
+        ("GDELT", "news tone history", lambda: small(nf.GDELT + "?query=sensex&mode=timelinetone&format=json&timespan=7d")),
+    ]
+
+    def run(c):
+        name, use, fn = c
+        t0 = _t.time()
+        try:
+            got = fn()
+            return {"Source": name, "Used for": use, "Status": "ok" if got else "unreachable", "Detail": got or "no data returned",
+                    "ms": int((_t.time() - t0) * 1000)}
+        except Exception as e:  # noqa: BLE001
+            return {"Source": name, "Used for": use, "Status": "unreachable", "Detail": f"{type(e).__name__}: {str(e)[:120]}",
+                    "ms": int((_t.time() - t0) * 1000)}
+
+    if jdata.demo_forced():
+        rows = [{"Source": n, "Used for": u, "Status": "skipped", "Detail": "offline test mode", "ms": 0} for n, u, _ in checks]
+    else:
+        with ThreadPoolExecutor(max_workers=len(checks)) as ex:
+            rows = list(ex.map(run, checks))
+    ok = sum(r["Status"] == "ok" for r in rows)
+    blocks = [kpis([("Sources answering", f"{ok} of {len(rows)}", "from this server, just now", "up" if ok >= len(rows) - 2 else "down")]),
+              table(pd.DataFrame(rows), [col("Source", "Source"), col("Status", "Status", "badge"), col("Used for", "Used for"),
+                                         col("Detail", "Detail"), col("ms", "Time (ms)", "int")]),
+              caption("Unreachable usually means that site refuses requests from cloud servers. JINNI then uses the next source "
+                      "in line, or says the data is unavailable.")]
+    return reply(doc(blocks, "live", ok=ok, total=len(rows)))
+
+
 # ---------------------------------------------------------------- catalog
 
 
