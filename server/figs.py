@@ -374,3 +374,19 @@ def fan_chart(hist: pd.Series, fan: pd.DataFrame, title: str = "") -> dict:
              "fillcolor": "rgba(76,141,255,0.25)", "name": "Half of outcomes"},
             {"type": "scatter", "x": fut, "y": _v(fan["p50"], 2), "name": "Middle path", "line": {"color": BLUE, "width": 2}}]
     return fig(data, {"title": title, "hovermode": "x unified"})
+
+
+def fork_chart(hist: pd.Series, rows: list[dict], title: str = "") -> dict:
+    """Recent prices, then three branches (favourable / base / unfavourable) to the event day, 1 week and 1 month out."""
+    last_d, last = hist.index[-1], float(hist.iloc[-1])
+    steps = {"Event day": 1, "1 week later": 5, "1 month later": 21}
+    fut = pd.bdate_range(last_d, periods=22)
+    xs = [last_d.strftime("%Y-%m-%d")] + [fut[steps[r["When"]]].strftime("%Y-%m-%d") for r in rows]
+    line = lambda key, name, color, dash=None: {  # noqa: E731
+        "type": "scatter", "mode": "lines+markers", "x": xs, "y": [round(last, 2)] + [round(r[key], 2) for r in rows], "name": name,
+        "line": {"color": color, "width": 2.2, **({"dash": dash} if dash else {})}, "marker": {"size": 7}}
+    data = [{"type": "scatter", "mode": "lines", "x": _x(hist.index), "y": _v(hist, 2), "name": "Price", "line": {"color": MUTED, "width": 1.5}},
+            line("Fav ₹", "If it goes well", UP),
+            {**line("Unfav ₹", "If it goes badly", DOWN), "fill": "tonexty", "fillcolor": "rgba(138,148,166,0.10)"},
+            line("Base ₹", "Typical", GOLD, "dot")]
+    return fig(data, {"title": title, "hovermode": "x unified"})

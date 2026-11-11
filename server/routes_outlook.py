@@ -220,9 +220,9 @@ def accuracy(target: float = Query(0.05, ge=0.01, le=0.3), h: int = Query(21, ge
         pdx = prices(tk + [BENCHMARK], "5y", ttl=3600)
         dfs = {t: pdx.ohlcv(t) for t in tk if t in pdx.close and pdx.close[t].notna().sum() > 500}
         bench = pdx.close[BENCHMARK].dropna()
-        return ac.collect(dfs, bench, target, h, step=10, n_paths=400), pdx.source
+        return ac.collect(dfs, bench, target, h, step=10, n_paths=400), pdx.source, ac.range_coverage(dfs, h, step=15, n_paths=400)
 
-    s, source = memo(("accuracy", tuple(tk), target, h), 6 * 3600, build)
+    s, source, cov = memo(("accuracy", tuple(tk), target, h), 6 * 3600, build)
     if s.empty:
         raise ApiError(422, "Not enough price history to measure accuracy.")
     sm_ = ac.summary(s)
@@ -249,6 +249,15 @@ def accuracy(target: float = Query(0.05, ge=0.01, le=0.3), h: int = Query(21, ge
                   "yaxis": {"title": "What actually happened", "tickformat": ".0%"}})
     blocks.append(plot(f, 340))
     blocks.append(table(cal, [col("Samples", "Predictions", "int"), col("Predicted", "Stated chance", "pct0"), col("Actual", "Actually reached", "pct0")]))
+    if cov.get("n"):
+        blocks.append(section("Are the price-forecast ranges honest?"))
+        blocks.append(kpis([
+            ("Inside the 9-in-10 range", pct(cov["in90"], 0), "should be about 90%", "up" if abs(cov["in90"] - 0.9) < 0.05 else "down"),
+            ("Inside the half range", pct(cov["in50"], 0), "should be about 50%", "up" if abs(cov["in50"] - 0.5) < 0.07 else "down"),
+            ("Ended above the middle", pct(cov["above_mid"], 0), "should be about 50%"),
+            ("Typical range width", pct(cov["avg_width"], 0), f"low to high, {h} days ahead")]))
+        blocks.append(caption(f"{cov['n']:,} forecasts on {cov['stocks']} stocks: each range was made with only the past, then compared "
+                              f"with the price {h} trading days later. This is the test behind the Forecast tab."))
     blocks.append(section("Which signals can rank stocks that reach the target?"))
     blocks.append(table(sig, [col("Signal", "Signal"), col("AUC", "AUC", "n3"), col("Top 20% hit", "Top 20% hit rate", "pct0"),
                               col("Bottom 20% hit", "Bottom 20% hit rate", "pct0"), col("Base rate", "Base rate", "pct0"),
@@ -270,3 +279,131 @@ def accuracy(target: float = Query(0.05, ge=0.01, le=0.3), h: int = Query(21, ge
                           "survivorship bias (today's index members); 'reached' means the day's high touched the level. Past accuracy "
                           "does not guarantee future accuracy."))
     return reply(doc(blocks, source, auc=sm_["auc_sim"], base=sm_["base"]), ttl=1800)
+
+
+# ------------------------------------------------------------------ scenarios
+
+
+def _scenario_series(symbol: str):
+    """(close series, display label, source). Indices use the longest history Yahoo has so rare events are covered."""
+    from jinni.universe import normalize_symbol
+
+    sym = normalize_symbol(symbol)
+    if sym.startswith("^"):
+        pdx = prices([sym], "max", ttl=3600)
+        return pdx.close[sym].dropna(), display_name(sym), pdx.source, sym
+    c = ctx(sym)
+    return c.df["Close"], display_name(c.t), c.source, c.t
+
+
+@router.get("/scenarios/events")
+def scenarios_events(symbol: str = "^NSEI"):
+    """For each kind of scheduled event: the level if it goes well, the typical level, and the level if it goes badly."""
+    from jinni import scenarios as sc
+    from jinni import seasonality as se
+
+    close, label, source, sym = _scenario_series(symbol)
+    last, today = float(close.iloc[-1]), close.index[-1]
+    blocks = source_notice(source)
+    blocks.append(callout("warn", "**Scenarios, not predictions.** Nobody knows the outcome of an election, a rate decision or a Budget "
+                                  "in advance. What can be measured is what each kind of outcome was worth before: the best third of "
+                                  "past reactions ('goes well'), the middle ('typical') and the worst third ('goes badly'), turned into "
+                                  f"price levels from today's {label} at ₹{last:,.2f}."))
+    try:
+        news, _ = _news()
+        radar = nf.event_radar(news) if len(news) else pd.DataFrame()
+    except Exception:  # noqa: BLE001
+        radar = pd.DataFrame()
+    hot = {"Election": "Election / results", "RBI": "RBI policy", "Fed": "US Fed (FOMC)", "Budget": "Union Budget"}
+    tabs_, summary = [], []
+    for name, (dates, off) in se.BUILTIN_EVENTS.items():
+        br = sc.branches(close, dates, off)
+        if not br or not br["rows"]:
+            continue
+        nxt = [d for d in pd.to_datetime(dates) if d > today]
+        in_news = next((int(radar.loc[radar["Event"] == v, "Mentions"].iloc[0]) for k, v in hot.items()
+                        if k.lower() in name.lower() and len(radar) and (radar["Event"] == v).any()), 0)
+        b = [kpis([("Past occurrences", str(br["n"]), "in this price history"),
+                   ("Next scheduled", f"{min(nxt):%d %b %Y}" if nxt else "not scheduled", f"in {(min(nxt) - today).days} days" if nxt else "dates end with the last known one"),
+                   ("In today's news", f"{in_news} headlines" if in_news else "quiet", "live event radar")])]
+        b.append(plot(figs.fork_chart(close.iloc[-60:], br["rows"], f"{label} after: {name}"), 360))
+        t = pd.DataFrame(br["rows"])
+        b.append(table(t, [col("When", "When"), col("Unfav ₹", "If it goes badly ₹", "inr2"), col("Base ₹", "Typical ₹", "inr2"),
+                           col("Fav ₹", "If it goes well ₹", "inr2"), col("Unfavourable", "Badly %", "spct2"), col("Base", "Typical %", "spct2"),
+                           col("Favourable", "Well %", "spct2"), col("Worst", "Worst ever", "spct2"), col("Best", "Best ever", "spct2"),
+                           col("Up %", "Rose", "pct0"), col("n", "Events", "int")]))
+        bt = sc.branch_backtest(close, dates, off)
+        sz = sc.event_day_size(close, dates, off)
+        notes = []
+        if bt:
+            w = bt.get("1 week later") or next(iter(bt.values()))
+            notes.append(f"**Back-test:** replaying the past {w['n']} occurrences using only earlier ones, the 1-week result landed between "
+                         f"the 'badly' and 'well' levels {w['inside']:.0%} of the time, and inside the full earlier range {w['inside_extremes']:.0%}.")
+        else:
+            notes.append("**Back-test:** too few past occurrences to replay (needs at least 7). Treat these levels as rough.")
+        if sz:
+            notes.append(f"Event days moved {sz['event']:.2%} on average vs {sz['normal']:.2%} on ordinary days "
+                         f"({'bigger' if sz['ratio'] > 1.15 else 'smaller' if sz['ratio'] < 0.85 else 'about the same'}).")
+        b.append(text(" ".join(notes)))
+        h = br["history"].reset_index()
+        b.append(table(h, [col("Date", "Past event", "date")] + [col(k, k, "spct2") for k in sc.HORIZONS], height=320))
+        tabs_.append((min(nxt) if nxt else pd.Timestamp.max, name.split(" →")[0], b))
+        wk = next((r for r in br["rows"] if r["When"] == "1 week later"), br["rows"][0])
+        summary.append({"Event": name.split(" →")[0], "Next": min(nxt) if nxt else None, "Badly ₹": wk["Unfav ₹"], "Typical ₹": wk["Base ₹"],
+                        "Well ₹": wk["Fav ₹"], "Events": br["n"]})
+    if not tabs_:
+        blocks.append(callout("info", f"{label} does not have enough price history covering past events to build scenarios."))
+        return reply(doc(blocks, source), ttl=600)
+    tabs_.sort(key=lambda x: x[0])
+    blocks.append(section("One week after each kind of event"))
+    blocks.append(table(pd.DataFrame(summary), [col("Event", "Event"), col("Next", "Next date", "date"), col("Badly ₹", "If badly ₹", "inr2"),
+                                                col("Typical ₹", "Typical ₹", "inr2"), col("Well ₹", "If well ₹", "inr2"), col("Events", "Past events", "int")]))
+    blocks.append({"type": "tabs", "tabs": [{"label": l, "blocks": b} for _, l, b in tabs_]})
+    blocks.append(caption("Levels use closes: the close before the event to the close on the event day, 5 and 21 sessions later. "
+                          "Event dates are built in up to the last published schedule; add your own in the Event lab."))
+    return reply(doc(blocks, source), ttl=600)
+
+
+@router.get("/scenarios/whatif")
+def scenarios_whatif(symbol: str, nifty: float = Query(0, ge=-50, le=50), sp500: float = Query(0, ge=-50, le=50),
+                     crude: float = Query(0, ge=-60, le=100), usdinr: float = Query(0, ge=-20, le=20),
+                     gold: float = Query(0, ge=-40, le=60)):
+    """Expected move of a stock if the market, US equities, crude, the rupee or gold jump (inputs in percent)."""
+    from jinni import scenarios as sc
+
+    c = ctx(symbol)
+    fx = memo(("factors",), 3600, lambda: prices(list(sc.FACTORS), "5y", ttl=3600))
+    fit = memo(("factorfit", c.t, str(c.df.index[-1])), 3600, lambda: sc.fit_factors(c.df["Close"], fx.close))
+    if not fit:
+        raise ApiError(422, "Not enough overlapping history to estimate this stock's sensitivities.")
+    price = float(c.df["Close"].iloc[-1])
+    blocks = source_notice(c.source)
+    custom = {"^NSEI": nifty / 100, "^GSPC": sp500 / 100, "BZ=F": crude / 100, "USDINR=X": usdinr / 100, "GC=F": gold / 100}
+    custom = {k: v for k, v in custom.items() if v}
+    if custom:
+        w = sc.what_if(fit, custom)
+        desc = ", ".join(f"{sc.FACTORS[k]} {v:+.0%}" for k, v in custom.items())
+        blocks.append(kpis([("Your scenario", pct(w["move"], 1, True), desc, tone(w["move"])),
+                            ("Price in that scenario", f"₹{price * (1 + w['move']):,.2f}", f"now ₹{price:,.2f}"),
+                            ("Likely band", f"₹{price * (1 + w['low']):,.0f} – ₹{price * (1 + w['high']):,.0f}", "±1 week of stock-specific noise")]))
+    rows = []
+    for name, sh in sc.PRESETS.items():
+        w = sc.what_if(fit, sh)
+        rows.append({"Scenario": name, "Move": w["move"], "Price ₹": price * (1 + w["move"]), "Low ₹": price * (1 + w["low"]), "High ₹": price * (1 + w["high"])})
+    t = pd.DataFrame(rows)
+    f = figs.bar_h(t["Scenario"], t["Move"], f"{display_name(c.t)}: expected move in each scenario", ".1%",
+                   xrange=[float(t["Move"].min() * 1.6 - 0.01), float(t["Move"].max() * 1.6 + 0.01)])
+    blocks.append(plot(f, 120 + 40 * len(t)))
+    blocks.append(table(t, [col("Scenario", "Scenario"), col("Move", "Expected move", "spct1"), col("Price ₹", "Price ₹", "inr2"),
+                            col("Low ₹", "Low ₹", "inr2"), col("High ₹", "High ₹", "inr2")]))
+    sens = pd.DataFrame([{"Driver": sc.FACTORS[k], "Sensitivity": v, "Meaning": f"a +1% move in {sc.FACTORS[k]} has gone with {v:+.2f}% in this stock (other drivers held fixed)"}
+                         for k, v in fit["betas"].items()])
+    blocks.append(section("Sensitivities and how far to trust them"))
+    blocks.append(table(sens, [col("Driver", "Driver"), col("Sensitivity", "Beta", "n2"), col("Meaning", "Meaning")]))
+    trust = "strong" if fit["oos_r2"] > 0.4 else "moderate" if fit["oos_r2"] > 0.15 else "weak"
+    blocks.append(text(f"**Back-test:** fitted on the first {fit['weeks'] - fit['oos_weeks']} weeks and checked on the next {fit['oos_weeks']} it had "
+                       f"not seen, these drivers explained **{max(fit['oos_r2'], 0):.0%}** of the stock's weekly moves (correlation "
+                       f"{fit['oos_corr']:.2f}): a {trust} guide. The rest is company-specific news, which is why each scenario has a band."))
+    blocks.append(caption("Weekly returns over the last three years, ordinary least squares. Scenarios assume the historical relationship "
+                          "holds and say nothing about how likely each shock is."))
+    return reply(doc(blocks, c.source, r2=fit["r2"], oos_r2=fit["oos_r2"]), ttl=600)

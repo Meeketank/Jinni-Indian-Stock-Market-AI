@@ -64,7 +64,7 @@ function draw(el) {
   try {
     const { data, layout } = themed(job.fig, job.height);
     el.style.height = job.height + 'px';
-    window.Plotly.react(el, data, layout, CONFIG).then(() => el.classList.remove('loading'));
+    window.Plotly.react(el, data, layout, CONFIG).then(() => { el.classList.remove('loading'); el.classList.add('drawn'); });
   } catch (e) { el.textContent = 'This chart could not be drawn.'; el.classList.remove('loading'); console.error(e); }
 }
 

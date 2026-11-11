@@ -43,6 +43,14 @@ export async function render(view, params) {
         layers: ly.get().join(','), ...zm.get(), heikin: hk.get() ? 1 : 0 }));
     } },
     { label: 'Forecast', load: (p) => livePanel(p, [], () => api('forecast')) },
+    { label: 'Scenarios', load: (p) => {
+      p.append(h('p', { class: 'page-sub' }, 'What this stock has been worth after each kind of event (if it goes well, typical, if it goes badly), and what happens to it if the market, crude, the rupee, US stocks or gold jump.'));
+      const ev = h('div'); const wi = h('div'); p.append(h('div', { class: 'section-title' }, 'Events: three branches'), ev, h('div', { class: 'section-title' }, 'What if…'), wi);
+      livePanel(ev, [], () => get('/scenarios/events', { symbol: ticker }));
+      const sl = (label, min, max) => Slider({ label, min, max, step: 1, value: 0, fmt: (v) => `${v > 0 ? '+' : ''}${v}%` });
+      const n = sl('NIFTY 50', -30, 30), sp = sl('S&P 500 (US)', -30, 30), cr = sl('Brent crude', -40, 60), fx = sl('USD/INR (rupee weaker = +)', -10, 10), gd = sl('Gold', -25, 40);
+      livePanel(wi, [n, sp, cr, fx, gd], () => get('/scenarios/whatif', { symbol: ticker, nifty: n.get(), sp500: sp.get(), crude: cr.get(), usdinr: fx.get(), gold: gd.get() }));
+    } },
     { label: 'Patterns', load: (p) => { const zm = Span({ label: 'Look for patterns in the last', n: 6, unit: 'month' });
       const hz = Segmented({ label: 'Look-ahead for history stats (trading days)', options: [5, 10, 20], value: 10 });
       livePanel(p, [zm, hz], () => api('patterns', { h: hz.get(), ...zm.get() })); } },

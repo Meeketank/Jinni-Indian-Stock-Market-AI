@@ -92,7 +92,25 @@ export function download(name, text, mime = 'text/plain') {
 }
 export const loadingBox = (msg = 'Working…', steps = '') =>
   h('div', { class: 'loading-box' }, h('div', { class: 'spinner' }), h('div', {}, msg), h('div', { class: 'steps' }, steps),
-    h('div', { class: 'progress hidden' }, h('i')));
+    h('div', { class: 'progress hidden' }, h('i')),
+    h('div', { class: 'skel', 'aria-hidden': 'true' }, h('i'), h('i'), h('i'), h('i', { class: 'wide' })));
+
+const calm = window.matchMedia('(prefers-reduced-motion: reduce)');
+// Count a KPI up to its value: keeps the prefix/suffix and the number's own formatting (₹, %, commas, decimals).
+function countUp(el, text) {
+  const m = /^([^\d\-+−]*)([+\-−]?)(\d[\d,]*)(\.\d+)?(.*)$/s.exec(text);
+  if (!m || calm.matches || /[–]|\d\s*\/\s*\d/.test(text)) { el.textContent = text; return; }
+  const [, pre, sign, int, dec = '', post] = m; const target = parseFloat(int.replace(/,/g, '') + dec); const places = dec ? dec.length - 1 : 0;
+  if (!Number.isFinite(target) || target === 0) { el.textContent = text; return; }
+  const fmt = new Intl.NumberFormat('en-IN', { minimumFractionDigits: places, maximumFractionDigits: places, useGrouping: int.includes(',') });
+  const t0 = performance.now(), dur = 650;
+  const step = (now) => {
+    const k = Math.min(1, (now - t0) / dur), e = 1 - (1 - k) ** 3;
+    el.textContent = k === 1 ? text : `${pre}${sign}${fmt.format(target * e)}${post}`;
+    if (k < 1) requestAnimationFrame(step);
+  };
+  el.textContent = `${pre}${sign}${fmt.format(0)}${post}`; requestAnimationFrame(step);
+}
 
 // Results container with loading / error / content states.
 export class Results {
@@ -142,7 +160,12 @@ export function tabsUI(items, { onShow, initial = 0 } = {}) {
 // ---------------------------------------------------------- block renderer
 export function renderBlocks(blocks, ctx = {}) {
   const frag = document.createDocumentFragment();
-  for (const b of blocks || []) { const n = block(b, ctx); if (n) frag.append(n); }
+  let i = 0;
+  for (const b of blocks || []) {
+    const n = block(b, ctx); if (!n) continue;
+    if (n.nodeType === 1) { n.classList.add('reveal'); n.style.setProperty('--i', Math.min(i++, 10)); }
+    frag.append(n);
+  }
   return frag;
 }
 const wrapBlocks = (blocks, ctx) => { const d = h('div'); d.append(renderBlocks(blocks, ctx)); return d; };
@@ -152,7 +175,8 @@ function block(b, ctx) {
     case 'kpis': return h('div', { class: 'kpi-grid' }, b.items.map((k) => {
       const t = k.tone ? ` ${k.tone}` : '';
       return h('div', { class: 'kpi' }, h('div', { class: 'lbl', title: k.label }, k.label),
-        h('div', { class: `val${k.sub ? '' : t}` }, k.value), k.sub ? h('div', { class: `sub${t}` }, k.sub) : null);
+        (() => { const v = h('div', { class: `val${k.sub ? '' : t}` }); countUp(v, String(k.value)); return v; })(),
+        k.sub ? h('div', { class: `sub${t}` }, k.sub) : null);
     }));
     case 'section': return h('div', { class: 'section-title' }, b.title);
     case 'text': return h('div', { class: `prose${b.muted ? ' muted' : ''}`, html: md(b.text) });

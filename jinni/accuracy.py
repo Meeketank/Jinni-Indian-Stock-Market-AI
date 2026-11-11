@@ -120,3 +120,28 @@ def summary(s: pd.DataFrame) -> dict:
     out["ret_t"] = float(s["ret_trade"].mean() / s["ret_trade"].std() * np.sqrt(len(s))) if s["ret_trade"].std() > 0 else np.nan
     out["brier_trail"] = brier(s["p_trail"], y) if s["p_trail"].notna().sum() > 50 else np.nan
     return out
+
+
+def range_coverage(dfs: dict[str, pd.DataFrame], h: int = 21, step: int = 10, n_paths: int = 600, min_hist: int = 300) -> dict:
+    """Walk-forward check of the price-forecast ranges: how often did the price h days later land inside the
+    stated 5-95% range (should be ~90%) and the 25-75% range (should be ~50%)? Also the bias of the middle value."""
+    rows = []
+    for tk, df in dfs.items():
+        c = df["Close"]
+        for t in range(min_hist, len(df) - h - 1, step):
+            try:
+                sim = fc.simulate(df.iloc[: t + 1], h, 0.05, None, n_paths=n_paths, annual_drift=fc.MARKET_DRIFT)
+            except ValueError:
+                continue
+            q = sim.terminal_pct
+            real = float(c.iloc[t + h] / c.iloc[t] - 1)
+            rows.append({"ticker": tk, "date": df.index[t], "real": real, "p5": q[5], "p25": q[25], "p50": q[50], "p75": q[75], "p95": q[95]})
+    s = pd.DataFrame(rows)
+    if s.empty:
+        return {"n": 0}
+    return {"n": len(s), "stocks": s["ticker"].nunique(), "h": h,
+            "in90": float(((s["real"] >= s["p5"]) & (s["real"] <= s["p95"])).mean()),
+            "in50": float(((s["real"] >= s["p25"]) & (s["real"] <= s["p75"])).mean()),
+            "below5": float((s["real"] < s["p5"]).mean()), "above95": float((s["real"] > s["p95"]).mean()),
+            "above_mid": float((s["real"] > s["p50"]).mean()), "avg_width": float((s["p95"] - s["p5"]).mean()),
+            "mean_real": float(s["real"].mean()), "mean_mid": float(s["p50"].mean()), "from": s["date"].min(), "to": s["date"].max()}
