@@ -612,3 +612,78 @@ def test_accuracy_walk_forward_is_calibrated_enough_on_synthetic_data(client):
 def test_universe_route_reports_listed_and_filtered(client):
     u = client.get("/api/market/universe").json()
     assert u["listed"] >= u["count"] > 100 and len(u["rows"][0]) == 3
+
+
+# ------------------------------------------- forecast, trend, BSE fallback, diagnostics
+
+
+def test_trend_state_and_price_forecast_are_consistent():
+    from jinni import data as jd
+    from jinni import trend
+
+    df = jd.get_prices(["TCS.NS"], "5y").ohlcv("TCS.NS")
+    st = trend.state_series(df).dropna()
+    assert set(st.unique()) <= {-2, -1, 0, 1, 2}
+    d = trend.describe(df)
+    assert d["label"] in trend.LABELS.values() and d["days_in_state"] >= 1
+    pf = trend.price_forecast(df, n_paths=1500)
+    assert list(pf["Days"]) == [5, 10, 21, 63, 126]
+    assert (pf["Low"] < pf["Median"]).all() and (pf["Median"] < pf["High"]).all()
+    assert (pf["High"] - pf["Low"]).is_monotonic_increasing                  # uncertainty grows with time
+    assert (pf["P +10%"] <= pf["P +5%"]).all() and (pf["P +5%"] <= 1).all()
+    af = trend.after_state(df)
+    assert {"State", "Horizon", "Days", "Avg move", "Up %"} <= set(af.columns)
+
+
+def test_forecast_endpoint(client):
+    r = client.get(f"/api/stock/{T}/forecast")
+    assert r.status_code == 200, r.text[:300]
+    text_ = json.dumps(strict_json(r.text))
+    assert "Nobody can know a future price" in text_ and "Price forecast by horizon" in text_ and "Trend now" in text_
+
+
+def test_finder_rows_carry_forecast_price_range_and_trend(client):
+    tk = ",".join(t + ".NS" for t in ["TCS", "INFY", "ITC", "LT", "SBIN", "TATASTEEL"])
+    for rank in ("chance", "trend", "outcome"):
+        body = client.get(f"/api/finder?target=0.1&hz=5&tickers={tk}&ml=0&rank={rank}").json()
+        tb = [b for b in walk_blocks(body["blocks"]) if b["type"] == "table"][0]
+        r0 = tb["rows"][0]
+        assert r0["Exp price"] > 0 and "–" in r0["Range"] and r0["Trend"]
+        if rank == "outcome":
+            ev = [r["Exp. return"] for r in tb["rows"]]
+            assert ev == sorted(ev, reverse=True)
+        if rank == "trend":
+            ups = [r["Trend"] in ("Uptrend", "Strong uptrend") for r in tb["rows"]]
+            assert ups == sorted(ups, reverse=True)
+
+
+def test_bse_list_falls_back_to_yahoo_and_dedupes_by_symbol(monkeypatch):
+    from jinni import bhav, live
+
+    quotes = [{"symbol": "TCS.BO", "longName": "Tata Consultancy", "regularMarketPrice": 2500, "regularMarketPreviousClose": 2480,
+               "regularMarketVolume": 1000},
+              {"symbol": "ONLYBSE.BO", "shortName": "Only Bse Ltd", "regularMarketPrice": 50, "regularMarketPreviousClose": 48,
+               "regularMarketVolume": 400000},
+              {"symbol": "NOPREV.BO", "regularMarketPrice": 10}]
+
+    class FakeYF:
+        def screen(self, q, size=0, offset=0, sortField=None, sortAsc=None):
+            return {"quotes": quotes if offset == 0 else []}
+
+    monkeypatch.setattr(live, "_yf", lambda: FakeYF())
+    monkeypatch.setattr(live, "demo_forced", lambda: False)
+    bse = live.exchange_quotes("BSE")
+    assert list(bse["ticker"]) == ["TCS.BO", "ONLYBSE.BO"]                     # rows without a previous close dropped
+    nse = bhav.parse_nse("SYMBOL, SERIES, DATE1, PREV_CLOSE, OPEN_PRICE, HIGH_PRICE, LOW_PRICE, LAST_PRICE, CLOSE_PRICE, AVG_PRICE, "
+                         "TTL_TRD_QNTY, TURNOVER_LACS, NO_OF_TRADES, DELIV_QTY, DELIV_PER\n"
+                         "TCS, EQ, 10-Nov-2026, 2480, 2490, 2510, 2470, 2495, 2496, 2490, 200000, 4902.09, 5000, 100000, 50\n")
+    both = bhav.merge(nse, bse)
+    assert sorted(both["ticker"]) == ["ONLYBSE.BO", "TCS.NS"]                  # cross-listing matched by symbol when no ISIN
+    assert both.loc[both["ticker"] == "ONLYBSE.BO", "chg"].iloc[0] == pytest.approx(50 / 48 - 1)
+
+
+def test_diagnostics_lists_every_source(client):
+    body = client.get("/api/diagnostics").json()
+    tb = [b for b in body["blocks"] if b["type"] == "table"][0]
+    names = {r["Source"] for r in tb["rows"]}
+    assert {"Yahoo prices", "NSE end-of-day file", "BSE end-of-day file", "Yahoo screener · BSE", "Google News", "GDELT"} <= names

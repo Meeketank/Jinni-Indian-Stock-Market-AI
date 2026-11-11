@@ -264,7 +264,7 @@ function tableBlock(b, ctx) {
         grid.append(h('div', { class: `tc-item${long ? ' long' : ''}` }, h('span', { class: 'tc-l' }, c.label), h('span', { class: 'tc-v' }, ...td.childNodes)));
       }
       card.append(grid);
-      if (b.select) card.addEventListener('click', () => pick(r, card, cards));
+      if (b.select) { card.append(h('div', { class: 'tc-more' }, 'Tap for full details ›')); card.addEventListener('click', () => pick(r, card, cards)); }
       if (selected !== null && r[b.select?.key] === selected) card.classList.add('sel');
       return card;
     }));

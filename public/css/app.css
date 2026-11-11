@@ -273,3 +273,5 @@ table.tbl { border-collapse: separate; border-spacing: 0; width: 100%; font-vari
 .combo .opt.act { background: rgba(245,184,65,.16); } .combo .opt.none { color: var(--muted); cursor: default; justify-content: flex-start; }
 .combo .opt span { font-weight: 700; flex: none; } .combo .opt small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
 .row { flex-wrap: wrap; }
+
+.tc-more { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--row-line); color: var(--gold); font-weight: 600; font-size: .85rem; }

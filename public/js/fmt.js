@@ -23,9 +23,9 @@ export function date(v) {
 }
 
 // Map status-like words to a badge colour class.
-const GREEN = new Set(['STRONG BUY', 'BUY', 'BULLISH', 'TARGET HIT', 'CONFIRMED', 'ACTIVE']);
-const RED = new Set(['STRONG SELL', 'SELL', 'BEARISH', 'STOP HIT', 'FAILED']);
-const GOLD = new Set(['HOLD', 'NEUTRAL', 'OPEN', 'EXPIRED', 'PRINTED', 'FORMING', 'FILLED']);
+const GREEN = new Set(['STRONG BUY', 'BUY', 'BULLISH', 'TARGET HIT', 'CONFIRMED', 'ACTIVE', 'UPTREND', 'STRONG UPTREND', 'OK']);
+const RED = new Set(['STRONG SELL', 'SELL', 'BEARISH', 'STOP HIT', 'FAILED', 'DOWNTREND', 'STRONG DOWNTREND', 'UNREACHABLE']);
+const GOLD = new Set(['HOLD', 'NEUTRAL', 'OPEN', 'EXPIRED', 'PRINTED', 'FORMING', 'FILLED', 'SIDEWAYS']);
 export function badgeClass(v) {
   const k = String(v).toUpperCase();
   if (k === 'STRONG BUY') return 'b-sbuy'; if (k === 'STRONG SELL') return 'b-ssell';

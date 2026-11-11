@@ -42,6 +42,7 @@ export async function render(view, params) {
       livePanel(p, [zm, ov, pn, ly, hk], () => api('chart', { overlays: ov.get().join(','), panels: pn.get().join(','),
         layers: ly.get().join(','), ...zm.get(), heikin: hk.get() ? 1 : 0 }));
     } },
+    { label: 'Forecast', load: (p) => livePanel(p, [], () => api('forecast')) },
     { label: 'Patterns', load: (p) => { const zm = Span({ label: 'Look for patterns in the last', n: 6, unit: 'month' });
       const hz = Segmented({ label: 'Look-ahead for history stats (trading days)', options: [5, 10, 20], value: 10 });
       livePanel(p, [zm, hz], () => api('patterns', { h: hz.get(), ...zm.get() })); } },
